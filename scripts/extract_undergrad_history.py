@@ -1,38 +1,35 @@
 #!/usr/bin/env python3
 """Extract the historical undergraduate coverage of mathlib from Git history.
 
-The script reads `docs/undergrad.yaml` out of the *upstream* mathlib4
-repository, samples its Git history at monthly intervals, and writes a JSON
-file describing, for every snapshot, how many topics are formalised.
+The topic list `docs/undergrad.yaml` lived in mathlib3
+(leanprover-community/mathlib) from 2020-09 until it was ported to mathlib4
+(leanprover-community/mathlib4) in July 2023 by #6026. The port was a faithful
+copy -- both sides of the boundary hold the same 561 topics with the same 345
+formalised -- so the two histories are stitched into one continuous series and
+the timeline reaches back to 2020 instead of starting in 2023.
+
+Because a port is not a rename, `git log --follow` cannot cross that boundary;
+the two repositories have to be read separately.
 
 Classification
 --------------
-Each leaf of `undergrad.yaml` is one topic, and its value is classified the
-same way mathlib's own `scripts/yaml_check.py` classifies it:
+Each leaf of `undergrad.yaml` is one topic, classified the same way mathlib's
+own `scripts/yaml_check.py` classifies it:
 
-    if entry and "/" not in entry:   # a real Lean declaration
+    if entry and "/" not in entry:   # a real declaration
 
-* ``implemented`` -- a Lean declaration name (no ``/``).
+* ``implemented`` -- a declaration name (no ``/``).
 * ``external``    -- a URL or path (contains ``/``). These mark topics that are
-  *not* formalised in mathlib and merely link to an outside reference.
+  *not* formalised and merely link to an outside reference.
 * ``todo``        -- an empty or missing value.
 
 Counting ``external`` as implemented overstates coverage *and* hides progress:
 when a topic is finally formalised its value flips from a URL to a declaration,
 which is real work that would otherwise register as no change at all.
 
-Source of truth
----------------
-Coverage is always read from upstream mathlib4, never from a local fork, so the
-numbers cannot silently freeze because a fork fell behind.
-
 Usage
 -----
-    # clone upstream into a cache directory and extract
     python3 scripts/extract_undergrad_history.py --clone --output web/data.json
-
-    # reuse an existing checkout
-    python3 scripts/extract_undergrad_history.py --repo /path/to/mathlib4
 """
 
 from __future__ import annotations
@@ -47,9 +44,24 @@ from pathlib import Path
 
 import yaml
 
-UPSTREAM_URL = "https://github.com/leanprover-community/mathlib4.git"
-UPSTREAM_REF = "master"
-TOPIC_FILE = "docs/undergrad.yaml"
+# Ordered oldest first. Each source covers the period before the next source's
+# history begins, so the segments never overlap.
+SOURCES = [
+    {
+        "name": "mathlib3",
+        "url": "https://github.com/leanprover-community/mathlib.git",
+        "ref": "master",
+        "path": "docs/undergrad.yaml",
+        "live": False,  # archived; its HEAD is permanently old
+    },
+    {
+        "name": "mathlib4",
+        "url": "https://github.com/leanprover-community/mathlib4.git",
+        "ref": "master",
+        "path": "docs/undergrad.yaml",
+        "live": True,
+    },
+]
 
 IMPLEMENTED = "implemented"
 EXTERNAL = "external"
@@ -61,7 +73,6 @@ class GitError(RuntimeError):
 
 
 def run_git(repo: Path, args: list[str], *, check: bool = True) -> str:
-    """Run git inside `repo` and return stdout."""
     result = subprocess.run(
         ["git", "-C", str(repo), *args],
         capture_output=True,
@@ -76,44 +87,40 @@ def run_git(repo: Path, args: list[str], *, check: bool = True) -> str:
     return result.stdout
 
 
-def clone_upstream(dest: Path, url: str, ref: str) -> None:
-    """Create (or refresh) a blobless partial clone of upstream mathlib4.
+def clone_source(repo: Path, url: str, ref: str) -> None:
+    """Create or refresh a blobless partial clone.
 
-    A partial clone gives the complete commit history -- which is all that is
-    needed to walk `undergrad.yaml` -- while downloading file contents lazily,
-    so the whole checkout of mathlib is never transferred.
+    A partial clone carries the complete commit history -- all that is needed to
+    walk one file -- while fetching file contents on demand, so a full mathlib
+    checkout is never transferred.
     """
-    if (dest / ".git").exists():
-        print(f"refreshing existing clone at {dest}", file=sys.stderr)
-        run_git(dest, ["fetch", "--quiet", "origin", ref])
-        run_git(dest, ["update-ref", f"refs/heads/{ref}", f"refs/remotes/origin/{ref}"], check=False)
+    if (repo / ".git").exists():
+        print(f"refreshing {repo}", file=sys.stderr)
+        run_git(repo, ["fetch", "--quiet", "origin", ref], check=False)
+        run_git(repo, ["update-ref", f"refs/heads/{ref}", f"refs/remotes/origin/{ref}"], check=False)
         return
 
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    print(f"cloning {url} ({ref}) into {dest}", file=sys.stderr)
+    if repo.exists():
+        shutil.rmtree(repo)
+    repo.parent.mkdir(parents=True, exist_ok=True)
+    print(f"cloning {url} ({ref}) into {repo}", file=sys.stderr)
     result = subprocess.run(
         [
             "git", "clone", "--quiet",
-            "--filter=blob:none",  # fetch file contents on demand
-            "--no-checkout",       # we only ever read via `git show`
+            "--filter=blob:none", "--no-checkout",
             "--single-branch", "--branch", ref,
-            url, str(dest),
+            url, str(repo),
         ],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
-        raise GitError(f"clone failed: {result.stderr.strip()}")
+        raise GitError(f"clone of {url} failed: {result.stderr.strip()}")
 
 
 def file_history(repo: Path, ref: str, path: str) -> list[tuple[str, datetime]]:
-    """Return every commit touching `path`, oldest first, as (sha, date)."""
-    output = run_git(
-        repo,
-        ["log", "--reverse", "--format=%H %ct", ref, "--", path],
-    )
+    """Every commit touching `path`, oldest first, as (sha, date)."""
+    output = run_git(repo, ["log", "--reverse", "--format=%H %ct", ref, "--", path])
     history = []
     for line in output.splitlines():
         sha, _, ts = line.partition(" ")
@@ -137,22 +144,21 @@ def classify(value: object) -> str:
         text = value.strip()
         if not text:
             return TODO
-        # Lean declaration names never contain "/", so a "/" means the value is
-        # a URL or file path pointing outside mathlib.
+        # Declaration names never contain "/", so a "/" means the value points
+        # at a URL or file path outside the library.
         return EXTERNAL if "/" in text else IMPLEMENTED
     if isinstance(value, (list, tuple)):
         seen = {classify(item) for item in value}
         if IMPLEMENTED in seen:
             return IMPLEMENTED
         return EXTERNAL if EXTERNAL in seen else TODO
-    # Any other scalar is an unexpected but non-empty value; treat it as a name.
     return IMPLEMENTED
 
 
 def count_topics(node: object) -> dict[str, int]:
-    """Return topic counts for a subtree of the topic list."""
-    # An empty dict is a leaf with nothing in it, not a category with no topics;
-    # treating it as a category would silently drop the topic from the totals.
+    """Topic counts for a subtree of the topic list."""
+    # An empty mapping is a topic with nothing recorded, not a category with no
+    # topics; treating it as a category would drop it from the denominator.
     if isinstance(node, dict) and node:
         totals = {IMPLEMENTED: 0, EXTERNAL: 0, TODO: 0}
         for value in node.values():
@@ -176,7 +182,6 @@ def summarise(counts: dict[str, int]) -> dict[str, float | int]:
 
 
 def parse_snapshot(content: str) -> dict | None:
-    """Parse YAML content into overall and per-category summaries."""
     try:
         data = yaml.safe_load(content)
     except yaml.YAMLError as exc:
@@ -207,27 +212,48 @@ def month_starts(first: datetime, last: datetime) -> list[datetime]:
         dates.append(current)
 
 
-def build_timeline(repo: Path, ref: str, path: str) -> list[dict]:
-    """Sample the history of `path` at monthly boundaries."""
-    history = file_history(repo, ref, path)
-    if not history:
-        raise GitError(f"no commits touch {path} in {ref}")
+def combined_history(sources: list[dict]) -> list[tuple[datetime, str, dict]]:
+    """Stitch the per-source histories into one chronological list.
 
+    Each source is truncated at the point the next one takes over, so an older
+    repository that kept receiving commits after the port cannot reappear once
+    the newer one has started.
+    """
+    per_source = []
+    for source in sources:
+        history = file_history(source["repo"], source["ref"], source["path"])
+        if not history:
+            raise GitError(f"no commits touch {source['path']} in {source['name']}")
+        per_source.append(history)
+
+    combined: list[tuple[datetime, str, dict]] = []
+    for index, (source, history) in enumerate(zip(sources, per_source)):
+        cutoff = per_source[index + 1][0][1] if index + 1 < len(sources) else None
+        for sha, date in history:
+            if cutoff is not None and date >= cutoff:
+                continue
+            combined.append((date, sha, source))
+    combined.sort(key=lambda item: item[0])
+    return combined
+
+
+def build_timeline(sources: list[dict]) -> list[dict]:
+    history = combined_history(sources)
     now = datetime.now(timezone.utc)
     snapshots: dict[str, dict | None] = {}
     timeline: list[dict] = []
 
-    for boundary in month_starts(history[0][1], now):
+    for boundary in month_starts(history[0][0], now):
         # The state of the file at `boundary` is set by the last commit before it.
-        commit, commit_date = next(
-            ((sha, date) for sha, date in reversed(history) if date < boundary),
-            (None, None),
-        )
-        if commit is None:
+        entry = next(((d, s, src) for d, s, src in reversed(history) if d < boundary), None)
+        if entry is None:
             continue
+        commit_date, commit, source = entry
         if commit not in snapshots:
             try:
-                snapshots[commit] = parse_snapshot(file_at_commit(repo, commit, path))
+                snapshots[commit] = parse_snapshot(
+                    file_at_commit(source["repo"], commit, source["path"])
+                )
             except GitError as exc:
                 print(f"warning: {exc}", file=sys.stderr)
                 snapshots[commit] = None
@@ -239,6 +265,7 @@ def build_timeline(repo: Path, ref: str, path: str) -> list[dict]:
                 "date": boundary.strftime("%Y-%m-%d"),
                 "commit": commit[:7],
                 "commit_date": commit_date.strftime("%Y-%m-%d"),
+                "source": source["name"],
                 "overall": snapshot["overall"],
                 "metrics": {"velocity_per_month": None, "acceleration": None},
                 "categories": snapshot["categories"],
@@ -254,7 +281,7 @@ def add_metrics(timeline: list[dict]) -> None:
 
     The first entry has no previous month, so its velocity is undefined; the
     second has no previous velocity, so its acceleration is undefined. Both are
-    left as null rather than 0, which would invent a data point and show up as a
+    left null rather than 0, which would invent a data point and read as a
     spurious spike on the chart.
     """
     previous_implemented: int | None = None
@@ -276,43 +303,42 @@ def add_metrics(timeline: list[dict]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Extract mathlib undergraduate coverage history.")
     parser.add_argument("--output", default="web/data.json", help="path of the generated JSON file")
-    parser.add_argument("--repo", default=".mathlib-cache", help="path of the mathlib4 checkout to read")
-    parser.add_argument("--clone", action="store_true", help="create or refresh the checkout at --repo")
-    parser.add_argument("--url", default=UPSTREAM_URL, help="upstream repository URL")
-    parser.add_argument("--ref", default=UPSTREAM_REF, help="ref to read the history from")
-    parser.add_argument("--path", default=TOPIC_FILE, help="topic list within the repository")
+    parser.add_argument("--cache", default=".mathlib-cache", help="directory holding the clones")
+    parser.add_argument("--clone", action="store_true", help="create or refresh the clones")
     parser.add_argument(
         "--max-source-age-days",
         type=int,
         default=7,
-        help="fail if the source ref's newest commit is older than this (0 disables)",
+        help="fail if the live source's newest commit is older than this (0 disables)",
     )
     args = parser.parse_args()
 
-    repo = Path(args.repo)
+    cache = Path(args.cache)
+    sources = [dict(source, repo=cache / source["name"]) for source in SOURCES]
+
     try:
-        if args.clone:
-            clone_upstream(repo, args.url, args.ref)
-        if not (repo / ".git").exists():
-            print(f"error: {repo} is not a git repository (use --clone)", file=sys.stderr)
-            return 1
+        for source in sources:
+            if args.clone:
+                clone_source(source["repo"], source["url"], source["ref"])
+            if not (source["repo"] / ".git").exists():
+                print(f"error: {source['repo']} is not a git repository (use --clone)", file=sys.stderr)
+                return 1
+            source["head"] = run_git(source["repo"], ["rev-parse", source["ref"]]).strip()
+            head_ts = int(run_git(source["repo"], ["log", "-1", "--format=%ct", source["ref"]]).strip())
+            source["head_date"] = datetime.fromtimestamp(head_ts, tz=timezone.utc)
 
-        head = run_git(repo, ["rev-parse", args.ref]).strip()
-        head_ts = int(run_git(repo, ["log", "-1", "--format=%ct", args.ref]).strip())
-        head_date = datetime.fromtimestamp(head_ts, tz=timezone.utc)
+        # Only the live source can go stale; the archived one never moves again.
+        for source in (s for s in sources if s.get("live")):
+            age = datetime.now(timezone.utc) - source["head_date"]
+            if args.max_source_age_days and age > timedelta(days=args.max_source_age_days):
+                print(
+                    f"error: {source['name']} ref {source['ref']} is {age.days} days old "
+                    f"(newest commit {source['head'][:8]}); refusing to publish stale data",
+                    file=sys.stderr,
+                )
+                return 1
 
-        # Guard against silently publishing stale data: if the source has not
-        # moved in a week, we are almost certainly not reading live upstream.
-        age = datetime.now(timezone.utc) - head_date
-        if args.max_source_age_days and age > timedelta(days=args.max_source_age_days):
-            print(
-                f"error: source ref {args.ref} is {age.days} days old "
-                f"(newest commit {head[:8]} at {head_date.isoformat()}); refusing to publish stale data",
-                file=sys.stderr,
-            )
-            return 1
-
-        timeline = build_timeline(repo, args.ref, args.path)
+        timeline = build_timeline(sources)
     except GitError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -331,13 +357,17 @@ def main() -> int:
     payload = {
         "meta": {
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "source": {
-                "repository": args.url,
-                "ref": args.ref,
-                "head": head[:7],
-                "head_date": head_date.strftime("%Y-%m-%d"),
-                "path": args.path,
-            },
+            "sources": [
+                {
+                    "name": s["name"],
+                    "repository": s["url"],
+                    "ref": s["ref"],
+                    "path": s["path"],
+                    "head": s["head"][:7],
+                    "head_date": s["head_date"].strftime("%Y-%m-%d"),
+                }
+                for s in sources
+            ],
             "history_starts": timeline[0]["date"],
             "total_snapshots": len(timeline),
             "categories": categories,
@@ -349,11 +379,13 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
 
+    counts = {s["name"]: sum(1 for e in timeline if e["source"] == s["name"]) for s in sources}
     overall = latest["overall"]
     print(
-        f"wrote {len(timeline)} snapshots to {output}\n"
-        f"latest ({latest['date']}): {overall['implemented']}/{overall['total']} "
-        f"= {overall['percentage']}% implemented, "
+        f"wrote {len(timeline)} snapshots to {output} "
+        f"({', '.join(f'{k}: {v}' for k, v in counts.items())})\n"
+        f"span {timeline[0]['date']} to {latest['date']}\n"
+        f"latest: {overall['implemented']}/{overall['total']} = {overall['percentage']}% formalised, "
         f"{overall['external']} external references, {overall['todo']} todo"
     )
     return 0

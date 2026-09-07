@@ -6,6 +6,7 @@ Run with:  python3 -m pytest tests/ -q
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -17,8 +18,10 @@ from extract_undergrad_history import (  # noqa: E402
     EXTERNAL,
     IMPLEMENTED,
     TODO,
+    GitError,
     add_metrics,
     classify,
+    combined_history,
     count_topics,
     month_starts,
     parse_snapshot,
@@ -195,3 +198,80 @@ class TestRegressionAgainstMathlibRule:
         after = parse_snapshot(yaml.safe_dump({"Cat": {"Sub": {"t": "Real.Decl"}}}))
         assert before["overall"]["implemented"] == 0
         assert after["overall"]["implemented"] == 1
+
+
+def utc(year, month, day):
+    return datetime(year, month, day, tzinfo=timezone.utc)
+
+
+class TestCombinedHistory:
+    """Stitching mathlib3 and mathlib4 into one chronological series.
+
+    `git log --follow` cannot cross the boundary because the file was *ported*
+    between two unrelated repositories rather than renamed within one, so the
+    two histories are read separately and joined here.
+    """
+
+    @staticmethod
+    def sources(monkeypatch, histories):
+        import extract_undergrad_history as mod
+
+        by_name = {name: history for name, history in histories.items()}
+        monkeypatch.setattr(
+            mod,
+            "file_history",
+            lambda repo, ref, path: by_name[repo],
+        )
+        return [
+            {"name": name, "repo": name, "ref": "master", "path": "docs/undergrad.yaml"}
+            for name in histories
+        ]
+
+    def test_orders_sources_chronologically(self, monkeypatch):
+        sources = self.sources(
+            monkeypatch,
+            {
+                "old": [("a", utc(2020, 1, 1)), ("b", utc(2021, 1, 1))],
+                "new": [("c", utc(2022, 1, 1))],
+            },
+        )
+        result = combined_history(sources)
+        assert [sha for _, sha, _ in result] == ["a", "b", "c"]
+        assert [src["name"] for _, _, src in result] == ["old", "old", "new"]
+
+    def test_old_source_is_cut_off_when_the_new_one_starts(self, monkeypatch):
+        # mathlib3 kept receiving commits after the port; they must not
+        # reappear and overwrite mathlib4's newer state.
+        sources = self.sources(
+            monkeypatch,
+            {
+                "old": [
+                    ("a", utc(2020, 1, 1)),
+                    ("stale", utc(2023, 6, 1)),
+                    ("staler", utc(2023, 12, 1)),
+                ],
+                "new": [("b", utc(2023, 5, 1))],
+            },
+        )
+        result = combined_history(sources)
+        assert [sha for _, sha, _ in result] == ["a", "b"]
+
+    def test_a_commit_exactly_at_the_cutoff_belongs_to_the_new_source(self, monkeypatch):
+        sources = self.sources(
+            monkeypatch,
+            {
+                "old": [("a", utc(2020, 1, 1)), ("tie", utc(2023, 5, 1))],
+                "new": [("b", utc(2023, 5, 1))],
+            },
+        )
+        result = combined_history(sources)
+        assert [sha for _, sha, _ in result] == ["a", "b"]
+
+    def test_empty_source_history_is_an_error(self, monkeypatch):
+        sources = self.sources(monkeypatch, {"old": [], "new": [("b", utc(2023, 1, 1))]})
+        with pytest.raises(GitError):
+            combined_history(sources)
+
+    def test_single_source_is_passed_through(self, monkeypatch):
+        sources = self.sources(monkeypatch, {"only": [("a", utc(2020, 1, 1))]})
+        assert [sha for _, sha, _ in combined_history(sources)] == ["a"]

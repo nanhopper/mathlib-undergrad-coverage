@@ -9,8 +9,9 @@
 <body>
 <header>
   <h1>Mathlib undergraduate coverage</h1>
-  <p id="subtitle">Historical evolution of <code>docs/undergrad.yaml</code> in
-    <a href="https://github.com/leanprover-community/mathlib4">leanprover-community/mathlib4</a></p>
+  <p id="subtitle">Historical evolution of <code>docs/undergrad.yaml</code>, stitched across
+    <a href="https://github.com/leanprover-community/mathlib">mathlib</a> (Lean 3) and
+    <a href="https://github.com/leanprover-community/mathlib4">mathlib4</a> (Lean 4)</p>
 </header>
 
 <main>
@@ -18,6 +19,7 @@
     <button id="play" type="button">▶ Play</button>
     <input id="scrubber" type="range" min="0" max="0" value="0" step="1">
     <span id="current-date">—</span>
+    <span id="current-source" class="badge">—</span>
   </section>
 
   <section id="summary">
@@ -41,7 +43,7 @@
 </main>
 
 <footer>
-  <p id="generated">Data generated from the Git history of mathlib4.</p>
+  <p id="generated">Data generated from the Git history of mathlib and mathlib4.</p>
 </footer>
 
 <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>

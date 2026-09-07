@@ -1,4 +1,4 @@
-# Partial clone of upstream mathlib4, recreated by the extractor.
+# Partial clones of upstream mathlib/mathlib4, recreated by the extractor.
 .mathlib-cache/
 
 __pycache__/

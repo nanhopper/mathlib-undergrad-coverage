@@ -63,11 +63,11 @@ jobs:
 
       # Coverage is read from upstream mathlib4, never from this repository, so
       # the published numbers cannot go stale if this repo is not updated.
-      - name: Extract the coverage history from upstream mathlib4
+      - name: Extract the coverage history from upstream mathlib and mathlib4
         run: |
           python3 scripts/extract_undergrad_history.py \
             --clone \
-            --repo .mathlib-cache \
+            --cache .mathlib-cache \
             --output web/data.json
 
       - name: Commit the refreshed data

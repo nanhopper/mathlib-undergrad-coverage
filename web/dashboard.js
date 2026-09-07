@@ -7,6 +7,7 @@ const els = {
   play: document.getElementById("play"),
   scrubber: document.getElementById("scrubber"),
   date: document.getElementById("current-date"),
+  source: document.getElementById("current-source"),
   implemented: document.getElementById("stat-implemented"),
   external: document.getElementById("stat-external"),
   total: document.getElementById("stat-total"),
@@ -27,6 +28,8 @@ function formatNumber(value) {
 
 function renderStats(entry) {
   els.date.textContent = entry.date;
+  els.source.textContent = entry.source;
+  els.source.dataset.source = entry.source;
   els.implemented.textContent = entry.overall.implemented;
   els.external.textContent = entry.overall.external;
   els.total.textContent = entry.overall.total;
@@ -81,6 +84,15 @@ function renderBars(entry, categories) {
   rows.exit().remove();
 }
 
+function sourceTransitions(timeline) {
+  // Indices where the underlying repository changes, e.g. the mathlib3 -> mathlib4 port.
+  const marks = [];
+  for (let i = 1; i < timeline.length; i += 1) {
+    if (timeline[i].source !== timeline[i - 1].source) marks.push(timeline[i]);
+  }
+  return marks;
+}
+
 function renderLine(timeline, index) {
   const svg = d3.select("#line");
   const width = svg.node().clientWidth || 800;
@@ -98,6 +110,7 @@ function renderLine(timeline, index) {
     group = svg.append("g").attr("class", "line-chart");
     group.append("g").attr("class", "axis x-axis");
     group.append("g").attr("class", "axis y-axis");
+    group.append("g").attr("class", "splices");
     group.append("path").attr("class", "line");
     group.append("circle").attr("class", "marker").attr("r", 5);
   }
@@ -107,6 +120,23 @@ function renderLine(timeline, index) {
   group.select("g.y-axis")
     .attr("transform", `translate(${margin.left},0)`)
     .call(d3.axisLeft(y).tickFormat((d) => `${d}%`));
+
+  const splices = group.select("g.splices")
+    .selectAll("g.splice")
+    .data(sourceTransitions(timeline), (d) => d.date);
+  const spliceEnter = splices.enter().append("g").attr("class", "splice");
+  spliceEnter.append("line");
+  spliceEnter.append("text");
+  const spliceMerged = spliceEnter.merge(splices);
+  spliceMerged.attr("transform", (d) => `translate(${x(parse(d.date))},0)`);
+  spliceMerged.select("line")
+    .attr("y1", margin.top)
+    .attr("y2", height - margin.bottom);
+  spliceMerged.select("text")
+    .attr("y", margin.top + 12)
+    .attr("dx", 5)
+    .text((d) => `→ ${d.source}`);
+  splices.exit().remove();
 
   const line = d3.line().x((p) => x(p.date)).y((p) => y(p.value));
   group.select("path.line").datum(points).attr("d", line);
@@ -140,15 +170,18 @@ function play() {
   state.timer = setInterval(() => show(state.index + 1), PLAY_INTERVAL_MS);
 }
 
+function describeSource(source) {
+  return `${source.name} (${source.ref} at ${source.head}, ${source.head_date})`;
+}
+
 function init(data) {
   state.data = data;
   els.scrubber.max = String(data.timeline.length - 1);
-  const source = data.meta.source || {};
+  const sources = data.meta.sources || [];
+  const read = sources.length ? sources.map(describeSource).join(" then ") : "unknown sources";
   els.generated.textContent =
-    `${data.meta.total_snapshots} monthly snapshots from ${data.meta.history_starts} ` +
-    `(when ${source.path || "undergrad.yaml"} was ported from mathlib3). ` +
-    `Read from ${source.ref || "master"} at ${source.head || "?"} (${source.head_date || "?"}); ` +
-    `generated ${data.meta.generated_at}.`;
+    `${data.meta.total_snapshots} monthly snapshots from ${data.meta.history_starts}, ` +
+    `stitched from the Git history of ${read}. Generated ${data.meta.generated_at}.`;
   els.scrubber.addEventListener("input", () => {
     stop();
     show(Number(els.scrubber.value));
