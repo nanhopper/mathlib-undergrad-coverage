@@ -79,21 +79,27 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add web/data.json
-          if git diff --cached --quiet; then
-            echo "no change to commit"
-            exit 0
-          fi
-          git commit -m "chore: refresh undergraduate coverage data"
           # A dispatched or queued run checks out the commit it was triggered
-          # at, which may predate the previous run's data refresh, so the first
-          # push can be rejected. Rebase onto the remote and retry.
+          # at, which may predate another run's data refresh, so the push can
+          # be rejected. web/data.json is a generated artifact rather than
+          # authored content, so there is nothing to merge and rebasing only
+          # produces a conflict: the freshly computed copy simply wins. Replay
+          # it on top of whatever the remote now holds instead.
+          cp web/data.json "$RUNNER_TEMP/data.json"
           for attempt in 1 2 3; do
+            git add web/data.json
+            if git diff --cached --quiet; then
+              echo "no change to commit"
+              exit 0
+            fi
+            git commit -m "chore: refresh undergraduate coverage data"
             if git push; then
               exit 0
             fi
-            echo "push rejected; rebasing onto origin/$GITHUB_REF_NAME (attempt $attempt)"
-            git pull --rebase origin "$GITHUB_REF_NAME"
+            echo "push rejected; replaying onto origin/$GITHUB_REF_NAME (attempt $attempt)"
+            git fetch origin "$GITHUB_REF_NAME"
+            git reset --hard "origin/$GITHUB_REF_NAME"
+            cp "$RUNNER_TEMP/data.json" web/data.json
           done
           echo "could not push the refreshed data after 3 attempts" >&2
           exit 1
