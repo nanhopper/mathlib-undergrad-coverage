@@ -82,10 +82,21 @@ jobs:
           git add web/data.json
           if git diff --cached --quiet; then
             echo "no change to commit"
-          else
-            git commit -m "chore: refresh undergraduate coverage data"
-            git push
+            exit 0
           fi
+          git commit -m "chore: refresh undergraduate coverage data"
+          # A dispatched or queued run checks out the commit it was triggered
+          # at, which may predate the previous run's data refresh, so the first
+          # push can be rejected. Rebase onto the remote and retry.
+          for attempt in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected; rebasing onto origin/$GITHUB_REF_NAME (attempt $attempt)"
+            git pull --rebase origin "$GITHUB_REF_NAME"
+          done
+          echo "could not push the refreshed data after 3 attempts" >&2
+          exit 1
 
       - name: Upload the dashboard
         uses: actions/upload-pages-artifact@v3
@@ -116,9 +127,12 @@ jobs:
     steps:
       # This repository exists only to run this job, so a silent failure would
       # otherwise go unnoticed until someone happened to look at the dashboard.
+      # This job deliberately does not check the repository out, so `gh` has no
+      # local git remote to infer the repository from; GH_REPO supplies it.
       - name: Open or update a tracking issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           title="Undergraduate coverage dashboard failed"
