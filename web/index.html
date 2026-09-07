@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mathlib undergraduate coverage over time</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Mathlib undergraduate coverage</h1>
+  <p id="subtitle">Historical evolution of <code>docs/undergrad.yaml</code> in
+    <a href="https://github.com/leanprover-community/mathlib4">leanprover-community/mathlib4</a></p>
+</header>
+
+<main>
+  <section id="controls">
+    <button id="play" type="button">▶ Play</button>
+    <input id="scrubber" type="range" min="0" max="0" value="0" step="1">
+    <span id="current-date">—</span>
+  </section>
+
+  <section id="summary">
+    <div class="card"><span class="label">Formalised</span><span class="value" id="stat-implemented">—</span></div>
+    <div class="card" title="Topics whose entry is a link to an outside reference rather than a mathlib declaration; these are not formalised."><span class="label">External refs</span><span class="value" id="stat-external">—</span></div>
+    <div class="card"><span class="label">Total topics</span><span class="value" id="stat-total">—</span></div>
+    <div class="card"><span class="label">Completion</span><span class="value" id="stat-percentage">—</span></div>
+    <div class="card"><span class="label">Velocity / month</span><span class="value" id="stat-velocity">—</span></div>
+    <div class="card"><span class="label">Acceleration</span><span class="value" id="stat-acceleration">—</span></div>
+  </section>
+
+  <section>
+    <h2>Completion per category</h2>
+    <svg id="bars" role="img" aria-label="Completion percentage per category"></svg>
+  </section>
+
+  <section>
+    <h2>Overall completion over time</h2>
+    <svg id="line" role="img" aria-label="Overall completion percentage over time"></svg>
+  </section>
+</main>
+
+<footer>
+  <p id="generated">Data generated from the Git history of mathlib4.</p>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script src="dashboard.js"></script>
+</body>
+</html>

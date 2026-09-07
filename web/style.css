@@ -1,0 +1,59 @@
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1b1f23;
+  --muted: #57606a;
+  --accent: #2f6feb;
+  --card: #f6f8fa;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --card: #161b22; }
+}
+
+body {
+  margin: 0;
+  padding: 0 1rem 3rem;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+header, main, footer { max-width: 60rem; margin: 0 auto; }
+h1 { margin-bottom: 0.25rem; }
+#subtitle, footer p { color: var(--muted); }
+
+#controls { display: flex; align-items: center; gap: 0.75rem; margin: 1.5rem 0; }
+#scrubber { flex: 1; }
+#current-date { font-variant-numeric: tabular-nums; min-width: 6rem; text-align: right; }
+
+button {
+  background: var(--accent);
+  color: #fff;
+  border: 0;
+  border-radius: 6px;
+  padding: 0.5rem 1rem;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+#summary { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+.card {
+  flex: 1 1 8rem;
+  background: var(--card);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-direction: column;
+}
+.card .label { color: var(--muted); font-size: 0.8rem; }
+.card .value { font-size: 1.4rem; font-variant-numeric: tabular-nums; }
+
+svg { width: 100%; height: 340px; }
+.axis text { fill: var(--muted); font-size: 0.75rem; }
+.axis line, .axis path { stroke: var(--muted); opacity: 0.4; }
+.bar { fill: var(--accent); }
+.bar-bg { fill: var(--card); }
+.bar-label { fill: var(--fg); font-size: 0.75rem; }
+.line { fill: none; stroke: var(--accent); stroke-width: 2px; }
+.marker { fill: var(--accent); }

@@ -1,0 +1,131 @@
+name: Undergraduate coverage dashboard
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - 'web/**'
+      - '!web/data.json'  # the weekly commit below must not retrigger this
+      - 'tests/**'
+      - '.github/workflows/dashboard.yml'
+
+permissions: {}
+
+concurrency:
+  group: undergrad-dashboard
+  # Never cancel a run that may be midway through a Pages deployment.
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test the extractor
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install pyyaml pytest
+
+      - run: python -m pytest tests/ -q
+
+  build:
+    name: Build the dashboard
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # commit the refreshed data back to the repository
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install pyyaml
+
+      # The clone is a blobless partial clone of upstream mathlib4; caching it
+      # avoids re-downloading the history and the file blobs every week.
+      - name: Restore the mathlib clone
+        uses: actions/cache@v4
+        with:
+          path: .mathlib-cache
+          key: mathlib-clone-v1-${{ github.run_id }}
+          restore-keys: mathlib-clone-v1-
+
+      # Coverage is read from upstream mathlib4, never from this repository, so
+      # the published numbers cannot go stale if this repo is not updated.
+      - name: Extract the coverage history from upstream mathlib4
+        run: |
+          python3 scripts/extract_undergrad_history.py \
+            --clone \
+            --repo .mathlib-cache \
+            --output web/data.json
+
+      - name: Commit the refreshed data
+        # Keeps a durable record of every reading and, just as importantly,
+        # counts as repository activity: GitHub disables scheduled workflows
+        # after 60 days without any, which would silently kill this dashboard.
+        # Pushes made with GITHUB_TOKEN do not trigger workflows, so this
+        # cannot loop; the path filter above is a second line of defence.
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add web/data.json
+          if git diff --cached --quiet; then
+            echo "no change to commit"
+          else
+            git commit -m "chore: refresh undergraduate coverage data"
+            git push
+          fi
+
+      - name: Upload the dashboard
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  report-failure:
+    name: Report a failure
+    needs: [test, build, deploy]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      # This repository exists only to run this job, so a silent failure would
+      # otherwise go unnoticed until someone happened to look at the dashboard.
+      - name: Open or update a tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Undergraduate coverage dashboard failed"
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "The dashboard failed again: $RUN_URL"
+          else
+            gh issue create --title "$title" \
+              --body "The weekly dashboard run failed: $RUN_URL"
+          fi

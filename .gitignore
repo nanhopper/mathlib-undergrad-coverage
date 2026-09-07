@@ -1,0 +1,6 @@
+# Partial clone of upstream mathlib4, recreated by the extractor.
+.mathlib-cache/
+
+__pycache__/
+*.pyc
+.pytest_cache/
