@@ -1,393 +1,259 @@
 #!/usr/bin/env python3
-"""Extract the historical undergraduate coverage of mathlib from Git history.
+"""Build both coverage benchmarks from pinned upstream Git records.
 
-The topic list `docs/undergrad.yaml` lived in mathlib3
-(leanprover-community/mathlib) from 2020-09 until it was ported to mathlib4
-(leanprover-community/mathlib4) in July 2023 by #6026. The port was a faithful
-copy -- both sides of the boundary hold the same 561 topics with the same 345
-formalised -- so the two histories are stitched into one continuous series and
-the timeline reaches back to 2020 instead of starting in 2023.
-
-Because a port is not a rename, `git log --follow` cannot cross that boundary;
-the two repositories have to be read separately.
-
-Classification
---------------
-Each leaf of `undergrad.yaml` is one topic, classified the same way mathlib's
-own `scripts/yaml_check.py` classifies it:
-
-    if entry and "/" not in entry:   # a real declaration
-
-* ``implemented`` -- a declaration name (no ``/``).
-* ``external``    -- a URL or path (contains ``/``). These mark topics that are
-  *not* formalised and merely link to an outside reference.
-* ``todo``        -- an empty or missing value.
-
-Counting ``external`` as implemented overstates coverage *and* hides progress:
-when a topic is finally formalised its value flips from a URL to a declaration,
-which is real work that would otherwise register as no change at all.
-
-Usage
------
-    python3 scripts/extract_undergrad_history.py --clone --output web/data.json
+The command name is retained for existing automation. No observation claims an
+exact proof-completion date: it is the state of a curated reference catalog.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import shutil
-import subprocess
+import os
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
-import yaml
+from coverage_model import DataError, Revision, SCHEMA_VERSION, Topic, iso
+from curriculum_coverage import curriculum_subjects, parse_curriculum
+from source_history import (
+    GitError,
+    clone_source,
+    commit_details,
+    file_at_commit,
+    file_history,
+    prefetch_file_blobs,
+    resolve_source,
+    taxonomy_files,
+)
 
-# Ordered oldest first. Each source covers the period before the next source's
-# history begins, so the segments never overlap.
 SOURCES = [
-    {
-        "name": "mathlib3",
-        "url": "https://github.com/leanprover-community/mathlib.git",
-        "ref": "master",
-        "path": "docs/undergrad.yaml",
-        "live": False,  # archived; its HEAD is permanently old
-    },
-    {
-        "name": "mathlib4",
-        "url": "https://github.com/leanprover-community/mathlib4.git",
-        "ref": "master",
-        "path": "docs/undergrad.yaml",
-        "live": True,
-    },
+    {"name": "mathlib3", "url": "https://github.com/leanprover-community/mathlib.git",
+     "ref": "master", "live": False},
+    {"name": "mathlib4", "url": "https://github.com/leanprover-community/mathlib4.git",
+     "ref": "master", "live": True},
+    {"name": "theorem-catalog", "url": "https://github.com/1000-plus/1000-plus.github.io.git",
+     "ref": "main", "live": False},
 ]
 
-IMPLEMENTED = "implemented"
-EXTERNAL = "external"
-TODO = "todo"
+
+def combined_history(sources: list[dict], path: str) -> list[tuple[datetime, str, datetime, dict]]:
+    per_source = []
+    for source in sources:
+        history = file_history(source["repo"], source["head"], path)
+        ordered = []
+        previous = history[0][1]
+        for sha, committed_at in history:
+            # Git timestamps need not be monotone. Preserve canonical ancestry
+            # and use the earliest consistent mainline observation time.
+            observed_at = max(previous, committed_at)
+            ordered.append((observed_at, sha, committed_at, source))
+            previous = observed_at
+        per_source.append(ordered)
+    result = []
+    for index, history in enumerate(per_source):
+        cutoff = per_source[index + 1][0][0] if index + 1 < len(per_source) else None
+        result.extend(entry for entry in history if cutoff is None or entry[0] < cutoff)
+    return result
 
 
-class GitError(RuntimeError):
-    """A git command failed."""
+def extract_revisions(
+    sources: list[dict], path: str, parser: Callable[[str], dict[str, Topic]], now: datetime
+) -> list[Revision]:
+    revisions = []
+    for observed_at, sha, committed_at, source in combined_history(sources, path):
+        if observed_at > now:
+            continue
+        try:
+            topics = parser(file_at_commit(source["repo"], sha, path))
+        except DataError as exc:
+            raise DataError(f"{source['name']}:{sha}:{path}: {exc}") from exc
+        summary, context = commit_details(source["repo"], sha)
+        revisions.append(Revision(
+            at=observed_at, commit=sha, committed_at=committed_at, source=source["name"],
+            url=f"{source['url'].removesuffix('.git')}/commit/{sha}",
+            summary=summary, context=context, topics=topics,
+        ))
+    if not revisions:
+        raise DataError(f"No observations for {path} at the requested cutoff")
+    return revisions
 
 
-def run_git(repo: Path, args: list[str], *, check: bool = True) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if result.returncode != 0:
-        if check:
-            raise GitError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
-        return ""
-    return result.stdout
+def build_benchmark(
+    identifier: str, title: str, description: str, scope: str,
+    revisions: list[Revision], subjects: dict[str, str], now: datetime, diagnostics: dict,
+) -> dict:
+    from coverage_metrics import make_snapshots
 
-
-def clone_source(repo: Path, url: str, ref: str) -> None:
-    """Create or refresh a blobless partial clone.
-
-    A partial clone carries the complete commit history -- all that is needed to
-    walk one file -- while fetching file contents on demand, so a full mathlib
-    checkout is never transferred.
-    """
-    if (repo / ".git").exists():
-        print(f"refreshing {repo}", file=sys.stderr)
-        run_git(repo, ["fetch", "--quiet", "origin", ref], check=False)
-        run_git(repo, ["update-ref", f"refs/heads/{ref}", f"refs/remotes/origin/{ref}"], check=False)
-        return
-
-    if repo.exists():
-        shutil.rmtree(repo)
-    repo.parent.mkdir(parents=True, exist_ok=True)
-    print(f"cloning {url} ({ref}) into {repo}", file=sys.stderr)
-    result = subprocess.run(
-        [
-            "git", "clone", "--quiet",
-            "--filter=blob:none", "--no-checkout",
-            "--single-branch", "--branch", ref,
-            url, str(repo),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise GitError(f"clone of {url} failed: {result.stderr.strip()}")
-
-
-def file_history(repo: Path, ref: str, path: str) -> list[tuple[str, datetime]]:
-    """Every commit touching `path`, oldest first, as (sha, date)."""
-    output = run_git(repo, ["log", "--reverse", "--format=%H %ct", ref, "--", path])
-    history = []
-    for line in output.splitlines():
-        sha, _, ts = line.partition(" ")
-        if sha and ts.strip().isdigit():
-            history.append((sha, datetime.fromtimestamp(int(ts), tz=timezone.utc)))
-    return history
-
-
-def file_at_commit(repo: Path, commit: str, path: str) -> str:
-    content = run_git(repo, ["show", f"{commit}:{path}"], check=False)
-    if not content.strip():
-        raise GitError(f"{path} is empty or missing at {commit[:8]}")
-    return content
-
-
-def classify(value: object) -> str:
-    """Classify one YAML leaf, mirroring mathlib's own `yaml_check.py` rule."""
-    if value is None:
-        return TODO
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return TODO
-        # Declaration names never contain "/", so a "/" means the value points
-        # at a URL or file path outside the library.
-        return EXTERNAL if "/" in text else IMPLEMENTED
-    if isinstance(value, (list, tuple)):
-        seen = {classify(item) for item in value}
-        if IMPLEMENTED in seen:
-            return IMPLEMENTED
-        return EXTERNAL if EXTERNAL in seen else TODO
-    return IMPLEMENTED
-
-
-def count_topics(node: object) -> dict[str, int]:
-    """Topic counts for a subtree of the topic list."""
-    # An empty mapping is a topic with nothing recorded, not a category with no
-    # topics; treating it as a category would drop it from the denominator.
-    if isinstance(node, dict) and node:
-        totals = {IMPLEMENTED: 0, EXTERNAL: 0, TODO: 0}
-        for value in node.values():
-            for key, count in count_topics(value).items():
-                totals[key] += count
-        return totals
-    counts = {IMPLEMENTED: 0, EXTERNAL: 0, TODO: 0}
-    counts[classify(node) if not isinstance(node, dict) else TODO] += 1
-    return counts
-
-
-def summarise(counts: dict[str, int]) -> dict[str, float | int]:
-    total = counts[IMPLEMENTED] + counts[EXTERNAL] + counts[TODO]
+    records = []
+    interned = {}
+    previous = {}
+    events = []
+    for index, revision in enumerate(revisions):
+        current = {}
+        for topic in revision.topics.values():
+            record = topic.record(revision.source)
+            key = json.dumps(record, sort_keys=True, ensure_ascii=True)
+            if key not in interned:
+                interned[key] = len(records)
+                records.append(record)
+            current[topic.id] = interned[key]
+        changed_ids = sorted(
+            key for key in previous.keys() | current.keys() if previous.get(key) != current.get(key)
+        )
+        events.append({
+            "at": iso(revision.at), "committed_at": iso(revision.committed_at),
+            "commit": revision.commit, "source": revision.source, "url": revision.url,
+            "summary": revision.summary, "context": revision.context, "initial": index == 0,
+            "changes": [[key, current.get(key)] for key in changed_ids],
+        })
+        previous = current
+    timeline, latest = make_snapshots(revisions, now)
+    if any(topic.subject not in subjects for revision in revisions for topic in revision.topics.values()):
+        raise DataError(f"Unlabelled subjects in {identifier}")
+    warnings = diagnostics.setdefault("warnings", [])
+    if any(revision.at != revision.committed_at for revision in revisions):
+        warnings.append("Nonmonotone commit timestamps were ordered by mainline ancestry.")
     return {
-        "total": total,
-        "implemented": counts[IMPLEMENTED],
-        "external": counts[EXTERNAL],
-        "todo": counts[TODO],
-        "percentage": round(100.0 * counts[IMPLEMENTED] / total, 2) if total else 0.0,
+        "id": identifier, "title": title, "description": description, "scope": scope,
+        "subjects": [{"id": key, "label": label} for key, label in sorted(subjects.items())],
+        "records": records, "events": events, "timeline": timeline, "latest": latest,
+        "diagnostics": diagnostics,
     }
 
 
-def parse_snapshot(content: str) -> dict | None:
+def generate(sources: list[dict], now: datetime, *, generated_at: datetime | None = None) -> dict:
+    from theorem_coverage import parse_taxonomy, parse_theorems, taxonomy_diagnostics
+
+    mathlib3, mathlib4, catalog = sources
+    print("Reading the curriculum's mainline history", file=sys.stderr)
+    curriculum = extract_revisions([mathlib3, mathlib4], "docs/undergrad.yaml", parse_curriculum, now)
+    subjects = {}
+    for revision in curriculum:
+        subjects.update(curriculum_subjects(revision.topics))
+    undergraduate = build_benchmark(
+        "undergraduate", "Undergraduate curriculum",
+        "A syllabus-derived baseline of undergraduate topics.",
+        "Recorded declaration or module references; not a certification of every topic's full scope.",
+        curriculum, subjects, now,
+        {"warnings": [
+            "Checklist edit dates are recording dates, not necessarily formalization dates.",
+            "An external or absent reference does not prove the topic is absent from mathlib.",
+            "The Lean 3/4 boundary joins checklist records, not independently certified equivalent libraries.",
+            "Reviewed legacy duplicate-label repairs preserve distinct Hilbert-space completeness entries. "
+            "Only immutable allowlisted Git blobs are repaired; repaired entries carry an evidence note.",
+        ]},
+    )
+
+    print("Reading the named-theorem catalog and pinned MSC subjects", file=sys.stderr)
+    taxonomy = parse_taxonomy(taxonomy_files(catalog["repo"], catalog["head"]))
+    theorem_history = extract_revisions(
+        [mathlib4], "docs/1000.yaml", lambda text: parse_theorems(text, taxonomy), now,
+    )
+    diagnostics = taxonomy_diagnostics(theorem_history[-1].topics, taxonomy)
+    diagnostics["taxonomy"] = {
+        "revision": catalog["head"],
+        "url": catalog["url"].removesuffix(".git") + "/tree/" + catalog["head"],
+        "note": "All observations use this pinned MSC taxonomy, not historical classifications.",
+    }
+    diagnostics.setdefault("warnings", []).extend([
+        "This catalog began in December 2024. Its initial population/backfills are not new proofs.",
+        "The denominator is the mathlib mirror, not a silently substituted canonical catalog.",
+        "Named Wikipedia theorems are a benchmark, not a representative sample of all mathematics.",
+        "Reviewed immutable historical blobs normalize legacy fields and preserve both references "
+        "from a duplicated declaration key. The theorem still counts once; unknown malformed records fail.",
+    ])
+    used_subjects = {topic.subject for rev in theorem_history for topic in rev.topics.values()}
+    subject_names = {key: value for key, value in taxonomy["subjects"].items() if key in used_subjects}
+    subject_names["unclassified"] = "Unclassified in the pinned taxonomy"
+    named = build_benchmark(
+        "named", "1000+ named theorems",
+        "A broader benchmark of named theorems, grouped by mathematical subject (MSC).",
+        "Recorded declarations in the mathlib repository, including Archive/Counterexamples; "
+        "external or unlocated Lean reports and statements are separate.",
+        theorem_history, subject_names, now, diagnostics,
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "meta": {
+            "generated_at": iso(generated_at or now), "observed_at": iso(now),
+            "sources": [
+                {key: (iso(value) if isinstance(value, datetime) else value)
+                 for key, value in source.items() if key in ("name", "url", "ref", "head", "head_date")}
+                for source in sources
+            ],
+        },
+        "benchmarks": [named, undergraduate],
+    }
+
+
+def write_payload(output: Path, payload: dict) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
     try:
-        data = yaml.safe_load(content)
-    except yaml.YAMLError as exc:
-        print(f"warning: could not parse a snapshot: {exc}", file=sys.stderr)
-        return None
-    if not isinstance(data, dict) or not data:
-        return None
-
-    categories = {}
-    overall = {IMPLEMENTED: 0, EXTERNAL: 0, TODO: 0}
-    for name, node in data.items():
-        counts = count_topics(node)
-        categories[str(name)] = summarise(counts)
-        for key, count in counts.items():
-            overall[key] += count
-    return {"overall": summarise(overall), "categories": categories}
-
-
-def month_starts(first: datetime, last: datetime) -> list[datetime]:
-    """First day of every month from the month after `first` through `last`."""
-    year, month = first.year, first.month
-    dates = []
-    while True:
-        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
-        current = datetime(year, month, 1, tzinfo=timezone.utc)
-        if current > last:
-            return dates
-        dates.append(current)
-
-
-def combined_history(sources: list[dict]) -> list[tuple[datetime, str, dict]]:
-    """Stitch the per-source histories into one chronological list.
-
-    Each source is truncated at the point the next one takes over, so an older
-    repository that kept receiving commits after the port cannot reappear once
-    the newer one has started.
-    """
-    per_source = []
-    for source in sources:
-        history = file_history(source["repo"], source["ref"], source["path"])
-        if not history:
-            raise GitError(f"no commits touch {source['path']} in {source['name']}")
-        per_source.append(history)
-
-    combined: list[tuple[datetime, str, dict]] = []
-    for index, (source, history) in enumerate(zip(sources, per_source)):
-        cutoff = per_source[index + 1][0][1] if index + 1 < len(sources) else None
-        for sha, date in history:
-            if cutoff is not None and date >= cutoff:
-                continue
-            combined.append((date, sha, source))
-    combined.sort(key=lambda item: item[0])
-    return combined
-
-
-def build_timeline(sources: list[dict]) -> list[dict]:
-    history = combined_history(sources)
-    now = datetime.now(timezone.utc)
-    snapshots: dict[str, dict | None] = {}
-    timeline: list[dict] = []
-
-    for boundary in month_starts(history[0][0], now):
-        # The state of the file at `boundary` is set by the last commit before it.
-        entry = next(((d, s, src) for d, s, src in reversed(history) if d < boundary), None)
-        if entry is None:
-            continue
-        commit_date, commit, source = entry
-        if commit not in snapshots:
-            try:
-                snapshots[commit] = parse_snapshot(
-                    file_at_commit(source["repo"], commit, source["path"])
-                )
-            except GitError as exc:
-                print(f"warning: {exc}", file=sys.stderr)
-                snapshots[commit] = None
-        snapshot = snapshots[commit]
-        if snapshot is None:
-            continue
-        timeline.append(
-            {
-                "date": boundary.strftime("%Y-%m-%d"),
-                "commit": commit[:7],
-                "commit_date": commit_date.strftime("%Y-%m-%d"),
-                "source": source["name"],
-                "overall": snapshot["overall"],
-                "metrics": {"velocity_per_month": None, "acceleration": None},
-                "categories": snapshot["categories"],
-            }
-        )
-
-    add_metrics(timeline)
-    return timeline
-
-
-def add_metrics(timeline: list[dict]) -> None:
-    """Fill in velocity (topics/month) and acceleration.
-
-    The first entry has no previous month, so its velocity is undefined; the
-    second has no previous velocity, so its acceleration is undefined. Both are
-    left null rather than 0, which would invent a data point and read as a
-    spurious spike on the chart.
-    """
-    previous_implemented: int | None = None
-    previous_velocity: float | None = None
-    for entry in timeline:
-        implemented = entry["overall"]["implemented"]
-        velocity = None if previous_implemented is None else float(implemented - previous_implemented)
-        acceleration = (
-            None if velocity is None or previous_velocity is None else velocity - previous_velocity
-        )
-        entry["metrics"] = {
-            "velocity_per_month": None if velocity is None else round(velocity, 2),
-            "acceleration": None if acceleration is None else round(acceleration, 2),
-        }
-        previous_implemented = implemented
-        previous_velocity = velocity
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=output.parent, prefix=".coverage-", suffix=".json",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump(payload, stream, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
+            stream.write("\n")
+        os.replace(temporary, output)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Extract mathlib undergraduate coverage history.")
-    parser.add_argument("--output", default="web/data.json", help="path of the generated JSON file")
-    parser.add_argument("--cache", default=".mathlib-cache", help="directory holding the clones")
-    parser.add_argument("--clone", action="store_true", help="create or refresh the clones")
-    parser.add_argument(
-        "--max-source-age-days",
-        type=int,
-        default=7,
-        help="fail if the live source's newest commit is older than this (0 disables)",
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", default="web/data.json")
+    parser.add_argument("--cache", default=".mathlib-cache")
+    parser.add_argument("--clone", action="store_true", help="create or refresh all upstream caches")
+    parser.add_argument("--max-source-age-days", type=int, default=7, help="live source age limit; 0 disables")
+    parser.add_argument("--as-of", help="reproducible timezone-qualified observation cutoff (ISO 8601)")
+    for name in ("mathlib3", "mathlib4", "catalog"):
+        parser.add_argument(f"--{name}-rev", help=f"pin {name} to an existing Git revision")
     args = parser.parse_args()
-
-    cache = Path(args.cache)
-    sources = [dict(source, repo=cache / source["name"]) for source in SOURCES]
-
     try:
-        for source in sources:
+        clock = datetime.now(timezone.utc)
+        now = datetime.fromisoformat(args.as_of) if args.as_of else clock
+        if now.tzinfo is None:
+            raise DataError("--as-of must include a timezone")
+        now = now.astimezone(timezone.utc)
+        if args.max_source_age_days < 0:
+            raise DataError("--max-source-age-days cannot be negative")
+        sources = []
+        for spec, revision in zip(SOURCES, (args.mathlib3_rev, args.mathlib4_rev, args.catalog_rev)):
+            source = dict(spec, repo=Path(args.cache) / spec["name"])
             if args.clone:
-                clone_source(source["repo"], source["url"], source["ref"])
-            if not (source["repo"] / ".git").exists():
-                print(f"error: {source['repo']} is not a git repository (use --clone)", file=sys.stderr)
-                return 1
-            source["head"] = run_git(source["repo"], ["rev-parse", source["ref"]]).strip()
-            head_ts = int(run_git(source["repo"], ["log", "-1", "--format=%ct", source["ref"]]).strip())
-            source["head_date"] = datetime.fromtimestamp(head_ts, tz=timezone.utc)
+                print(f"Refreshing {source['name']}", file=sys.stderr)
+                clone_source(source["repo"], source["url"], source["ref"], partial=source["name"] != "theorem-catalog")
+            if not (source["repo"] / ".git").is_dir():
+                raise GitError(f"Missing source cache {source['repo']}; use --clone")
+            source["head"], source["head_date"] = resolve_source(source["repo"], revision or source["ref"])
+            if source["head_date"] > now:
+                raise DataError(f"{source['name']} revision is newer than --as-of; pin an earlier revision")
+            if source["live"] and args.max_source_age_days and now - source["head_date"] > timedelta(days=args.max_source_age_days):
+                raise DataError(f"{source['name']} revision exceeds the live source age limit")
+            sources.append(source)
+        if args.clone:
+            prefetch_file_blobs(sources[0]["repo"], sources[0]["head"], ["docs/undergrad.yaml"])
+            prefetch_file_blobs(sources[1]["repo"], sources[1]["head"], ["docs/undergrad.yaml", "docs/1000.yaml"])
+        payload = generate(sources, now, generated_at=clock)
+        from validate_coverage import validate_payload
 
-        # Only the live source can go stale; the archived one never moves again.
-        for source in (s for s in sources if s.get("live")):
-            age = datetime.now(timezone.utc) - source["head_date"]
-            if args.max_source_age_days and age > timedelta(days=args.max_source_age_days):
-                print(
-                    f"error: {source['name']} ref {source['ref']} is {age.days} days old "
-                    f"(newest commit {source['head'][:8]}); refusing to publish stale data",
-                    file=sys.stderr,
-                )
-                return 1
-
-        timeline = build_timeline(sources)
-    except GitError as exc:
+        validate_payload(payload)
+        write_payload(Path(args.output), payload)
+    except (GitError, DataError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-
-    if not timeline:
-        print("error: no snapshot could be extracted", file=sys.stderr)
-        return 1
-
-    categories: list[str] = []
-    for entry in timeline:
-        for name in entry["categories"]:
-            if name not in categories:
-                categories.append(name)
-
-    latest = timeline[-1]
-    payload = {
-        "meta": {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "sources": [
-                {
-                    "name": s["name"],
-                    "repository": s["url"],
-                    "ref": s["ref"],
-                    "path": s["path"],
-                    "head": s["head"][:7],
-                    "head_date": s["head_date"].strftime("%Y-%m-%d"),
-                }
-                for s in sources
-            ],
-            "history_starts": timeline[0]["date"],
-            "total_snapshots": len(timeline),
-            "categories": categories,
-        },
-        "timeline": timeline,
-    }
-
-    output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
-
-    counts = {s["name"]: sum(1 for e in timeline if e["source"] == s["name"]) for s in sources}
-    overall = latest["overall"]
-    print(
-        f"wrote {len(timeline)} snapshots to {output} "
-        f"({', '.join(f'{k}: {v}' for k, v in counts.items())})\n"
-        f"span {timeline[0]['date']} to {latest['date']}\n"
-        f"latest: {overall['implemented']}/{overall['total']} = {overall['percentage']}% formalised, "
-        f"{overall['external']} external references, {overall['todo']} todo"
-    )
+    for benchmark in payload["benchmarks"]:
+        overall = benchmark["latest"]["overall"]
+        print(f"{benchmark['title']}: {overall['covered']}/{overall['total']} "
+              f"recorded references ({overall['percentage']:.2f}%)")
+    print(f"Wrote {args.output}")
     return 0
 
 

@@ -1,277 +1,268 @@
-"""Tests for the coverage extractor.
-
-Run with:  python3 -m pytest tests/ -q
-"""
+"""Regression coverage for evidence, identity, source safety, and publication."""
 
 from __future__ import annotations
 
+import json
+import copy
+import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from extract_undergrad_history import (  # noqa: E402
-    EXTERNAL,
-    IMPLEMENTED,
-    TODO,
-    GitError,
-    add_metrics,
-    classify,
-    combined_history,
-    count_topics,
-    month_starts,
-    parse_snapshot,
-    summarise,
-)
-
-
-class TestClassify:
-    """The classification rule must match mathlib's own `scripts/yaml_check.py`,
-    which treats a value containing "/" as an external reference, not a
-    declaration:  `if entry and "/" not in entry`."""
-
-    @pytest.mark.parametrize(
-        "value",
-        ["Module", "LinearMap.range", "Matrix.det", "  Submodule.span  "],
-    )
-    def test_declarations_are_implemented(self, value):
-        assert classify(value) == IMPLEMENTED
-
-    @pytest.mark.parametrize(
-        "value",
-        [
-            "https://en.wikipedia.org/wiki/Diagonalizable_matrix",
-            "https://www.math.tamu.edu/~fnarc/psfiles/rank2005.pdf",
-            "https://fr.wikipedia.org/wiki/Lemme_des_noyaux",
-        ],
-    )
-    def test_urls_are_external_not_implemented(self, value):
-        assert classify(value) == EXTERNAL
-
-    @pytest.mark.parametrize("value", [None, "", "   "])
-    def test_empty_is_todo(self, value):
-        assert classify(value) == TODO
-
-    def test_list_prefers_a_real_declaration(self):
-        assert classify(["https://example.com/x", "Module"]) == IMPLEMENTED
-
-    def test_list_of_only_urls_is_external(self):
-        assert classify(["https://example.com/x", "https://example.com/y"]) == EXTERNAL
-
-    def test_list_of_empties_is_todo(self):
-        assert classify([None, ""]) == TODO
-
-
-class TestCountTopics:
-    def test_counts_each_class(self):
-        node = {
-            "a": "Module",
-            "b": "https://example.com/ref",
-            "c": None,
-            "d": "LinearMap",
-        }
-        assert count_topics(node) == {IMPLEMENTED: 2, EXTERNAL: 1, TODO: 1}
-
-    def test_nested_categories_are_flattened(self):
-        node = {"outer": {"inner": {"leaf": "Module", "other": None}}}
-        assert count_topics(node) == {IMPLEMENTED: 1, EXTERNAL: 0, TODO: 1}
-
-    def test_empty_dict_counts_as_a_todo_leaf(self):
-        # An empty mapping is a topic with nothing recorded, not a category with
-        # no topics; dropping it would silently shrink the denominator.
-        assert count_topics({"a": {}}) == {IMPLEMENTED: 0, EXTERNAL: 0, TODO: 1}
-
-
-class TestSummarise:
-    def test_percentage_excludes_external_references(self):
-        result = summarise({IMPLEMENTED: 396, EXTERNAL: 40, TODO: 130})
-        assert result["total"] == 566
-        assert result["implemented"] == 396
-        assert result["external"] == 40
-        assert result["percentage"] == 69.96
-
-    def test_zero_total_does_not_divide_by_zero(self):
-        assert summarise({IMPLEMENTED: 0, EXTERNAL: 0, TODO: 0})["percentage"] == 0.0
-
-
-class TestParseSnapshot:
-    def test_parses_realistic_yaml(self):
-        content = """
-        Linear algebra:
-          Fundamentals:
-            vector space: 'Module'
-            elementary row operations: 'https://en.wikipedia.org/wiki/Elementary_matrix'
-            some missing topic:
-        Topology:
-          Basics:
-            topological space: 'TopologicalSpace'
-        """
-        snapshot = parse_snapshot(content)
-        assert snapshot["overall"] == {
-            "total": 4,
-            "implemented": 2,
-            "external": 1,
-            "todo": 1,
-            "percentage": 50.0,
-        }
-        assert snapshot["categories"]["Linear algebra"]["implemented"] == 1
-        assert snapshot["categories"]["Linear algebra"]["external"] == 1
-        assert snapshot["categories"]["Topology"]["percentage"] == 100.0
-
-    def test_invalid_yaml_returns_none(self):
-        assert parse_snapshot("a: b:\n  - [unclosed") is None
-
-    def test_empty_document_returns_none(self):
-        assert parse_snapshot("") is None
-
-
-class TestMetrics:
-    def test_first_two_entries_have_undefined_metrics(self):
-        # Reporting 0.0 here would invent data: the first entry has no previous
-        # month and the second has no previous velocity.
-        timeline = [{"overall": {"implemented": n}, "metrics": {}} for n in (10, 12, 15)]
-        add_metrics(timeline)
-        assert timeline[0]["metrics"] == {"velocity_per_month": None, "acceleration": None}
-        assert timeline[1]["metrics"] == {"velocity_per_month": 2.0, "acceleration": None}
-        assert timeline[2]["metrics"] == {"velocity_per_month": 3.0, "acceleration": 1.0}
-
-    def test_velocity_tracks_declarations_only(self):
-        timeline = [{"overall": {"implemented": n}, "metrics": {}} for n in (100, 100, 104)]
-        add_metrics(timeline)
-        assert [e["metrics"]["velocity_per_month"] for e in timeline] == [None, 0.0, 4.0]
-
-
-class TestMonthStarts:
-    def test_starts_the_month_after_the_first_commit(self):
-        from datetime import datetime, timezone
-
-        first = datetime(2023, 7, 21, tzinfo=timezone.utc)
-        last = datetime(2023, 11, 15, tzinfo=timezone.utc)
-        assert [d.strftime("%Y-%m-%d") for d in month_starts(first, last)] == [
-            "2023-08-01",
-            "2023-09-01",
-            "2023-10-01",
-            "2023-11-01",
-        ]
-
-    def test_rolls_over_the_year(self):
-        from datetime import datetime, timezone
-
-        first = datetime(2023, 11, 5, tzinfo=timezone.utc)
-        last = datetime(2024, 2, 1, tzinfo=timezone.utc)
-        assert [d.strftime("%Y-%m-%d") for d in month_starts(first, last)] == [
-            "2023-12-01",
-            "2024-01-01",
-            "2024-02-01",
-        ]
-
-
-class TestRegressionAgainstMathlibRule:
-    """Lock in the behaviour that the previous implementation got wrong."""
-
-    def test_url_topics_do_not_inflate_coverage(self):
-        content = yaml.safe_dump(
-            {
-                "Cat": {
-                    "Sub": {
-                        "done": "Module",
-                        "linked": "https://en.wikipedia.org/wiki/Jordan_normal_form",
-                        "missing": None,
-                    }
-                }
-            }
-        )
-        overall = parse_snapshot(content)["overall"]
-        # Counting the URL as implemented would give 66.67%.
-        assert overall["percentage"] == pytest.approx(33.33)
-
-    def test_url_becoming_a_declaration_registers_as_progress(self):
-        # This is the case the old implementation was blind to: the topic was
-        # already counted as done, so formalising it showed up as zero movement.
-        before = parse_snapshot(
-            yaml.safe_dump({"Cat": {"Sub": {"t": "https://en.wikipedia.org/wiki/X"}}})
-        )
-        after = parse_snapshot(yaml.safe_dump({"Cat": {"Sub": {"t": "Real.Decl"}}}))
-        assert before["overall"]["implemented"] == 0
-        assert after["overall"]["implemented"] == 1
+import curriculum_legacy
+import extract_undergrad_history as extractor
+import source_history
+from coverage_model import DataError, Revision, Topic, load_yaml, summarise_topics
+from curriculum_coverage import classify, curriculum_subjects, parse_curriculum
+from source_history import GitError, clone_source, file_history, run_git
 
 
 def utc(year, month, day):
     return datetime(year, month, day, tzinfo=timezone.utc)
 
 
-class TestCombinedHistory:
-    """Stitching mathlib3 and mathlib4 into one chronological series.
+@pytest.mark.parametrize("value,status", [
+    ("Module", "declaration"), ("  Submodule.span  ", "declaration"),
+    ("Mathlib/FieldTheory/Finite/Basic.html", "module"),
+    ("field_theory/finite.html", "module"),
+    ("https://leanprover-community.github.io/mathlib4_docs/Mathlib/Order/Basic.html", "module"),
+    ("https://en.wikipedia.org/wiki/Jordan_normal_form", "external"),
+    (None, "unlinked"), ("", "unlinked"), ("   ", "unlinked"),
+])
+def test_classification(value, status):
+    assert classify(value) == status
 
-    `git log --follow` cannot cross the boundary because the file was *ported*
-    between two unrelated repositories rather than renamed within one, so the
-    two histories are read separately and joined here.
-    """
 
-    @staticmethod
-    def sources(monkeypatch, histories):
-        import extract_undergrad_history as mod
+@pytest.mark.parametrize("value", [
+    True, False, 0, 1, 3.14, ["Module"], ["https://example.com/x"], [],
+    "../escape.html", "unrecognized/path", "mailto:somebody@example.com", "not a declaration",
+])
+def test_unsupported_leaf_fails(value):
+    with pytest.raises(DataError):
+        classify(value)
 
-        by_name = {name: history for name, history in histories.items()}
-        monkeypatch.setattr(
-            mod,
-            "file_history",
-            lambda repo, ref, path: by_name[repo],
+
+def test_four_classes_and_no_reference_is_not_absence():
+    topics = parse_curriculum("""
+Algebra:
+  Basics:
+    definition: Module
+    module: Mathlib/Algebra/Basic.html
+    external: https://example.com/reference
+    missing:
+    explicitly empty: {}
+""")
+    result = summarise_topics(topics.values())
+    assert result["total"] == 5
+    assert result["covered"] == 2
+    assert result["percentage"] == 40
+    assert result["statuses"]["unlinked"] == 2
+    assert result["statuses"]["module"] == result["statuses"]["declaration"] == 1
+
+
+def test_audited_current_distribution():
+    rows = {"declaration": 396, "module": 3, "external": 37, "unlinked": 130}
+    values = {"declaration": "Module", "module": "Mathlib/Test.html",
+              "external": "https://example.com/x", "unlinked": ""}
+    content = "Algebra:\n  Section:\n" + "".join(
+        f"    {status}{i}: '{values[status]}'\n" for status, n in rows.items() for i in range(n)
+    )
+    summary = summarise_topics(parse_curriculum(content).values())
+    assert (summary["covered"], summary["total"]) == (399, 566)
+    assert summary["percentage"] == pytest.approx(70.4946996466)
+
+
+def test_empty_population_is_unknown_not_zero_percent():
+    assert summarise_topics([])["percentage"] is None
+
+
+@pytest.mark.parametrize("text", ["", "[]", "a: b:\n  - [unclosed", "Subject:\n  x: Module",
+                                "Subject:\n  Part:\n    topic: Module\n    topic: null\n"])
+def test_invalid_or_duplicate_document_fails(text):
+    with pytest.raises(DataError):
+        parse_curriculum(text)
+
+
+@pytest.mark.parametrize("old_name,new_name", [
+    ("Measures and integral Calculus", "Measures and integral calculus"),
+    ("Affine and Euclidian Geometry", "Affine and Euclidean Geometry"),
+])
+def test_subject_alias_is_continuous_but_preserves_source_label(old_name, new_name):
+    template = "{}:\n  Section:\n    topic: Module\n"
+    old = parse_curriculum(template.format(old_name))
+    new = parse_curriculum(template.format(new_name))
+    assert old.keys() == new.keys()
+    assert curriculum_subjects(old) == curriculum_subjects(new)
+    assert next(iter(old.values())).path[0] != next(iter(new.values())).path[0]
+
+
+def test_alias_collision_fails_instead_of_dropping_topics():
+    with pytest.raises(DataError, match="collision"):
+        parse_curriculum("""
+Measures and integral Calculus:
+  Part:
+    x: Module
+Measures and integral calculus:
+  Part:
+    x: Module
+""")
+
+
+def test_repeated_reference_is_not_a_repeated_topic():
+    result = summarise_topics(parse_curriculum("Cat:\n  Part:\n    a: Module\n    b: Module").values())
+    assert result["covered"] == result["total"] == 2
+
+
+def test_unknown_duplicate_legacy_shape_still_fails():
+    with pytest.raises(DataError, match="Duplicate"):
+        parse_curriculum("Topology:\n  Hilbert spaces:\n    its completeness: lp.complete_space\n"
+                         "    its completeness: measure_theory.Lp.complete_space\n")
+
+
+def test_reviewed_legacy_completeness_entries_are_preserved(monkeypatch):
+    content = ("Topology:\n  Hilbert spaces:\n    its completeness: lp.complete_space\n"
+               "    its completeness: measure_theory.Lp.complete_space\n"
+               "    its completeness: span_fourier_Lp_closure_eq_top\n")
+    monkeypatch.setattr(curriculum_legacy, "REVIEWED_BLOBS", {curriculum_legacy.blob_hash(content)})
+    topics = parse_curriculum(content)
+    assert len(topics) == 3
+    assert len({topic.id for topic in topics.values()}) == 3
+    assert all(topic.note and topic.covered for topic in topics.values())
+    later = parse_curriculum("Topology:\n  Hilbert spaces:\n    completeness of $l^2$: lp.completeSpace\n"
+                             "    completeness of $L^2$: MeasureTheory.Lp.instCompleteSpace\n")
+    assert later.keys() <= topics.keys()
+
+
+def test_reviewed_identical_empty_duplicate_is_one_topic(monkeypatch):
+    content = ("Single Variable Complex Analysis:\n  Functions on one complex variable:\n"
+               "    Cauchy formulas:\n    Cauchy formulas:\n")
+    monkeypatch.setattr(curriculum_legacy, "REVIEWED_BLOBS", {curriculum_legacy.blob_hash(content)})
+    topics = parse_curriculum(content)
+    assert len(topics) == 1
+    assert next(iter(topics.values())).note
+
+
+def test_strict_yaml_rejects_duplicate_nonnested_keys():
+    with pytest.raises(DataError, match="Duplicate"):
+        load_yaml("Q1: {title: one}\nQ1: {title: two}")
+
+
+def test_failed_git_is_an_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(source_history.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(returncode=1, stderr="fetch failed", stdout=""))
+    with pytest.raises(GitError, match="fetch failed"):
+        run_git(tmp_path, ["fetch", "origin"])
+
+
+def test_refresh_does_not_update_a_ref_after_failed_fetch(monkeypatch, tmp_path):
+    (tmp_path / ".git").mkdir()
+    calls = []
+
+    def git(repo, args):
+        calls.append(args)
+        if args[0] == "remote":
+            return "https://example.com/source.git\n"
+        raise GitError("offline")
+
+    monkeypatch.setattr(source_history, "run_git", git)
+    with pytest.raises(GitError, match="offline"):
+        clone_source(tmp_path, "https://example.com/source.git", "master")
+    assert not any(args[0] == "update-ref" for args in calls)
+
+
+def test_clone_never_deletes_an_existing_nonrepository(tmp_path):
+    file = tmp_path / "important"
+    file.write_text("preserve", encoding="utf-8")
+    with pytest.raises(GitError, match="Refusing"):
+        clone_source(tmp_path, "https://example.com/source.git", "master")
+    assert file.read_text(encoding="utf-8") == "preserve"
+
+
+def test_failed_serialization_keeps_published_data_and_cleans_temp(tmp_path):
+    output = tmp_path / "data.json"
+    output.write_text('{"old":true}', encoding="utf-8")
+    with pytest.raises(ValueError):
+        extractor.write_payload(output, {"bad": float("nan")})
+    assert json.loads(output.read_text(encoding="utf-8")) == {"old": True}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["data.json"]
+
+
+def test_atomic_publication(tmp_path):
+    output = tmp_path / "web" / "data.json"
+    extractor.write_payload(output, {"schema_version": 2})
+    assert json.loads(output.read_text(encoding="utf-8")) == {"schema_version": 2}
+
+
+def test_source_cutoff_and_mainline_timestamp_order(monkeypatch):
+    histories = {
+        "old": [("a", utc(2020, 1, 1)), ("b", utc(2021, 1, 1)), ("late", utc(2024, 1, 1))],
+        "new": [("c", utc(2023, 7, 1)), ("d", utc(2023, 8, 1)), ("e", utc(2023, 7, 15))],
+    }
+    monkeypatch.setattr(extractor, "file_history", lambda repo, *_: histories[repo])
+    sources = [{"repo": name, "head": "pinned", "name": name} for name in histories]
+    result = extractor.combined_history(sources, "docs/undergrad.yaml")
+    assert [entry[1] for entry in result] == ["a", "b", "c", "d", "e"]
+    assert result[-1][0] == utc(2023, 8, 1)
+    assert result[-1][2] == utc(2023, 7, 15)
+
+
+def test_mainline_history_uses_merge_date_not_feature_branch_date(tmp_path):
+    def git(*args, day=None):
+        env = dict(os.environ)
+        if day:
+            env["GIT_AUTHOR_DATE"] = env["GIT_COMMITTER_DATE"] = f"2025-01-{day:02}T12:00:00+00:00"
+        result = subprocess.run(
+            ["git", "-C", str(tmp_path), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com",
+             *args], capture_output=True, encoding="utf-8", env=env,
         )
-        return [
-            {"name": name, "repo": name, "ref": "master", "path": "docs/undergrad.yaml"}
-            for name in histories
-        ]
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
 
-    def test_orders_sources_chronologically(self, monkeypatch):
-        sources = self.sources(
-            monkeypatch,
-            {
-                "old": [("a", utc(2020, 1, 1)), ("b", utc(2021, 1, 1))],
-                "new": [("c", utc(2022, 1, 1))],
-            },
-        )
-        result = combined_history(sources)
-        assert [sha for _, sha, _ in result] == ["a", "b", "c"]
-        assert [src["name"] for _, _, src in result] == ["old", "old", "new"]
+    git("init", "-b", "main")
+    path = tmp_path / "catalog.yaml"
+    path.write_text("initial\n", encoding="utf-8")
+    git("add", "catalog.yaml")
+    git("commit", "-qm", "initial", day=1)
+    git("switch", "-c", "feature")
+    path.write_text("changed\n", encoding="utf-8")
+    git("commit", "-qam", "feature work", day=2)
+    git("switch", "main")
+    git("merge", "--no-ff", "feature", "-m", "integrate feature", day=9)
+    history = file_history(tmp_path, "main", "catalog.yaml")
+    assert [when.day for _, when in history] == [1, 9]
+    assert history[-1][0] == git("rev-parse", "HEAD")
 
-    def test_old_source_is_cut_off_when_the_new_one_starts(self, monkeypatch):
-        # mathlib3 kept receiving commits after the port; they must not
-        # reappear and overwrite mathlib4's newer state.
-        sources = self.sources(
-            monkeypatch,
-            {
-                "old": [
-                    ("a", utc(2020, 1, 1)),
-                    ("stale", utc(2023, 6, 1)),
-                    ("staler", utc(2023, 12, 1)),
-                ],
-                "new": [("b", utc(2023, 5, 1))],
-            },
-        )
-        result = combined_history(sources)
-        assert [sha for _, sha, _ in result] == ["a", "b"]
 
-    def test_a_commit_exactly_at_the_cutoff_belongs_to_the_new_source(self, monkeypatch):
-        sources = self.sources(
-            monkeypatch,
-            {
-                "old": [("a", utc(2020, 1, 1)), ("tie", utc(2023, 5, 1))],
-                "new": [("b", utc(2023, 5, 1))],
-            },
-        )
-        result = combined_history(sources)
-        assert [sha for _, sha, _ in result] == ["a", "b"]
+def test_schema_v2_producer_replays_and_reconciles():
+    from validate_coverage import validate_payload
 
-    def test_empty_source_history_is_an_error(self, monkeypatch):
-        sources = self.sources(monkeypatch, {"old": [], "new": [("b", utc(2023, 1, 1))]})
-        with pytest.raises(GitError):
-            combined_history(sources)
-
-    def test_single_source_is_passed_through(self, monkeypatch):
-        sources = self.sources(monkeypatch, {"only": [("a", utc(2020, 1, 1))]})
-        assert [sha for _, sha, _ in combined_history(sources)] == ["a"]
+    before = Topic("t", "Topic", "s", ("Subject", "Part", "Topic"), "unlinked")
+    after = Topic("t", "Topic", "s", ("Subject", "Part", "Topic"), "declaration", ("Module",))
+    revisions = [
+        Revision(utc(2024, 1, 1), "a" * 40, utc(2024, 1, 1), "mathlib4",
+                 "https://example.com/commit/a", "Baseline", "documentation_only", {"t": before}),
+        Revision(utc(2024, 8, 2), "b" * 40, utc(2024, 8, 2), "mathlib4",
+                 "https://example.com/commit/b", "Record a reference", "documentation_only", {"t": after}),
+    ]
+    now = utc(2025, 2, 8)
+    benchmarks = [
+        extractor.build_benchmark(key, key, "Description", "Scope", revisions, {"s": "Subject"}, now, {})
+        for key in ("named", "undergraduate")
+    ]
+    data = {"schema_version": 2, "meta": {"generated_at": now.isoformat(), "observed_at": now.isoformat()},
+            "benchmarks": benchmarks}
+    validate_payload(data)
+    wrong = copy.deepcopy(data)
+    wrong["benchmarks"][0]["latest"]["overall"]["covered"] += 1
+    with pytest.raises(DataError, match="Covered count"):
+        validate_payload(wrong)
+    wrong = copy.deepcopy(data)
+    wrong["benchmarks"][0]["events"][0]["changes"][0][1] = 99
+    with pytest.raises(DataError, match="record index"):
+        validate_payload(wrong)

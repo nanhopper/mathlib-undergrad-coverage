@@ -1,52 +1,328 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mathlib undergraduate coverage over time</title>
-<link rel="stylesheet" href="style.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Recorded mathlib coverage across two separate reference benchmarks, with historical evidence and comparable subject trends.">
+  <title>Mathlib coverage · the recorded picture</title>
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header>
-  <h1>Mathlib undergraduate coverage</h1>
-  <p id="subtitle">Historical evolution of <code>docs/undergrad.yaml</code>, stitched across
-    <a href="https://github.com/leanprover-community/mathlib">mathlib</a> (Lean 3) and
-    <a href="https://github.com/leanprover-community/mathlib4">mathlib4</a> (Lean 4)</p>
-</header>
+  <a class="skip-link" href="#dashboard">Skip to coverage</a>
+  <header class="page-header">
+    <div class="header-top">
+      <div>
+        <h1>Mathlib coverage</h1>
+        <p class="intro">Two benchmarks. Coverage, recording pace, and subject gaps.</p>
+      </div>
+      <div class="observation-meta" aria-label="Dataset observation and source">
+        <p><span class="meta-label">Observed</span> <span id="observed-at" class="observation-date">Not loaded</span></p>
+        <p id="observation-age" class="small muted">This is a published snapshot, not a live view.</p>
+        <p id="source-status" class="small muted"></p>
+      </div>
+    </div>
+    <p class="scope-note"><strong>Two reference catalogs, not all mathematics.</strong>
+      Coverage and pace describe recorded references, not proof production.
+      <a href="#benchmark-methods">What counts?</a></p>
+    <nav class="section-nav" aria-label="Dashboard sections">
+      <a href="#overview-heading">Overview</a>
+      <a href="#subjects-heading">Subjects</a>
+      <a href="#analysis-heading">History &amp; pace</a>
+      <a href="#evidence-heading">Evidence</a>
+      <a href="#methodology">Methods &amp; sources</a>
+    </nav>
+  </header>
 
-<main>
-  <section id="controls">
-    <button id="play" type="button">▶ Play</button>
-    <input id="scrubber" type="range" min="0" max="0" value="0" step="1">
-    <span id="current-date">—</span>
-    <span id="current-source" class="badge">—</span>
-  </section>
+  <div id="load-state" class="load-panel" role="status" aria-live="polite">
+    <strong>Loading the recorded picture…</strong>
+    <p>Checking both benchmarks and their historical evidence before showing any counts.</p>
+  </div>
+  <div id="error-state" class="error-panel" role="alert" hidden>
+    <h2>Coverage data could not be displayed</h2>
+    <p id="error-message"></p>
+    <p class="small">No partial counts are shown. The dashboard and data must use the same schema.</p>
+    <button id="retry" type="button">Retry loading data</button>
+  </div>
+  <noscript>
+    <p class="error-panel">JavaScript is required to read the coverage artifact. No counts are displayed without validating the data.</p>
+  </noscript>
 
-  <section id="summary">
-    <div class="card"><span class="label">Formalised</span><span class="value" id="stat-implemented">—</span></div>
-    <div class="card" title="Topics whose entry is a link to an outside reference rather than a mathlib declaration; these are not formalised."><span class="label">External refs</span><span class="value" id="stat-external">—</span></div>
-    <div class="card"><span class="label">Total topics</span><span class="value" id="stat-total">—</span></div>
-    <div class="card"><span class="label">Completion</span><span class="value" id="stat-percentage">—</span></div>
-    <div class="card"><span class="label">Velocity / month</span><span class="value" id="stat-velocity">—</span></div>
-    <div class="card"><span class="label">Acceleration</span><span class="value" id="stat-acceleration">—</span></div>
-  </section>
+  <main id="dashboard" hidden tabindex="-1">
+    <section aria-labelledby="overview-heading">
+      <div class="section-heading compact-heading">
+        <h2 id="overview-heading" tabindex="-1">Latest coverage</h2>
+      </div>
+      <div class="overview-grid">
+        <article class="benchmark-card primary-benchmark" aria-labelledby="named-title">
+          <p class="eyebrow">Broader benchmark</p>
+          <h3 id="named-title">Named theorems</h3>
+          <div class="headline-value"><strong id="named-percentage">—</strong><span>recorded coverage</span></div>
+          <p id="named-count" class="benchmark-count"></p>
+          <div class="coverage-track hero-track" aria-hidden="true"><span id="named-bar"></span></div>
+          <p id="named-pace" class="benchmark-pace"></p>
+          <div class="card-bottom">
+            <button id="explore-named" class="text-button" type="button">Compare subjects <span aria-hidden="true">→</span></button>
+          </div>
+        </article>
+        <article class="benchmark-card secondary-benchmark" aria-labelledby="undergraduate-title">
+          <p class="eyebrow">Complementary baseline</p>
+          <h3 id="undergraduate-title">Undergraduate curriculum</h3>
+          <div class="headline-value"><strong id="undergraduate-percentage">—</strong><span>recorded coverage</span></div>
+          <p id="undergraduate-count" class="benchmark-count"></p>
+          <div class="coverage-track hero-track" aria-hidden="true"><span id="undergraduate-bar"></span></div>
+          <p id="undergraduate-pace" class="benchmark-pace"></p>
+          <div class="card-bottom">
+            <button id="explore-undergraduate" class="text-button" type="button">Compare subjects <span aria-hidden="true">→</span></button>
+          </div>
+        </article>
+      </div>
+    </section>
 
-  <section>
-    <h2>Completion per category</h2>
-    <svg id="bars" role="img" aria-label="Completion percentage per category"></svg>
-  </section>
+    <section id="explorer" class="explorer-controls panel" aria-labelledby="explorer-heading">
+      <h2 id="explorer-heading" class="sr-only">Choose the benchmark and observation to explore</h2>
+      <div class="control-grid">
+        <div class="field">
+          <label for="benchmark-select">Benchmark</label>
+          <select id="benchmark-select">
+            <option value="named" selected>Named theorems</option>
+            <option value="undergraduate">Undergraduate curriculum</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="observation-select">Observation</label>
+          <select id="observation-select"></select>
+        </div>
+        <fieldset class="window-control">
+          <legend>Change window</legend>
+          <div class="segmented-control">
+            <label><input type="radio" name="window" value="3"><span>3 months</span></label>
+            <label><input type="radio" name="window" value="6" checked><span>6 months</span></label>
+            <label><input type="radio" name="window" value="12"><span>12 months</span></label>
+          </div>
+        </fieldset>
+      </div>
+      <div class="selection-strip">
+        <span id="selection-badge" class="badge"></span>
+        <p id="selection-detail" class="small"></p>
+      </div>
+      <p id="historical-notice" class="historical-notice" hidden><strong>Historical view.</strong>
+        Everything below follows this observation. Overview cards remain latest.</p>
+    </section>
 
-  <section>
-    <h2>Overall completion over time</h2>
-    <svg id="line" role="img" aria-label="Overall completion percentage over time"></svg>
-  </section>
-</main>
+    <section id="subjects-section" class="panel subjects-panel" aria-labelledby="subjects-heading">
+      <div class="section-heading">
+        <h2 id="subjects-heading" tabindex="-1">Compare subjects</h2>
+        <p id="subjects-period" class="small muted"></p>
+      </div>
+      <div class="filter-grid subject-filters">
+        <div class="field"><label for="subject-search">Find a subject</label><input id="subject-search" type="search" placeholder="Name or MSC code" autocomplete="off"></div>
+        <div class="field"><label for="subject-sort">Order by</label><select id="subject-sort">
+          <option value="gaps" selected>Largest recorded gaps</option>
+          <option value="coverage">Lowest recorded coverage</option>
+          <option value="change">Most positive comparable change</option>
+          <option value="name">Subject name, A–Z</option>
+        </select></div>
+      </div>
+      <table class="subject-table" role="table">
+        <caption id="subjects-caption" class="sr-only"></caption>
+        <thead role="rowgroup"><tr role="row">
+          <th id="subject-name-column" scope="col" role="columnheader">Subject</th>
+          <th scope="col" role="columnheader">Recorded / listed</th>
+          <th id="subject-coverage-column" scope="col" role="columnheader">Coverage</th>
+          <th id="subject-change-column" scope="col" role="columnheader"><span id="subject-change-heading">6-month change</span><span class="table-subheading">same cohort · percentage points</span></th>
+          <th id="subject-gap-column" scope="col" role="columnheader" aria-sort="descending">No repo reference</th>
+        </tr></thead>
+        <tbody id="subject-rows" role="rowgroup"></tbody>
+      </table>
+      <div class="list-footer">
+        <p id="subject-count" class="small muted" role="status"></p>
+        <button id="subjects-more" class="secondary-button" type="button" hidden>Show all subjects</button>
+      </div>
+      <details class="data-disclosure">
+        <summary>How to read this comparison</summary>
+        <p id="subject-window-explanation" class="small"></p>
+        <p class="small muted">“No repo reference” includes every listed entry without a recorded repository reference,
+          not just unlinked entries. Missing references do not establish absence from mathlib.
+          Select a subject to inspect the evidence behind its counts.</p>
+        <p class="small"><a id="selection-source">View selected catalog YAML</a></p>
+      </details>
+    </section>
 
-<footer>
-  <p id="generated">Data generated from the Git history of mathlib and mathlib4.</p>
-</footer>
+    <details id="analysis-section" class="panel workspace-disclosure">
+      <summary><h2 id="analysis-heading" tabindex="-1">History &amp; recording pace
+        <span class="disclosure-hint">Trends, comparisons, and catalog changes</span></h2></summary>
+      <p id="analysis-context" class="small muted"></p>
+      <p id="chart-warning" class="notice" role="status" hidden>The chart is currently unavailable.
+        Counts, comparisons, and the history table remain available.</p>
+      <section class="detail-section history-panel" aria-labelledby="history-heading">
+        <div class="section-heading">
+          <h3 id="history-heading" tabindex="-1">Recorded coverage over time</h3>
+          <p id="selected-level" class="selected-level"></p>
+        </div>
+        <p id="history-description" class="small muted">The share of listed entries with a declaration or module reference.
+          Steps connect observations; there is no assumed zero before the catalog begins.</p>
+        <figure class="history-figure">
+          <svg id="history-chart" role="img" aria-labelledby="history-chart-title history-chart-description"></svg>
+          <p id="chart-unavailable" class="empty-state" hidden>Chart unavailable. Use the equivalent history table below.</p>
+          <figcaption class="chart-legend">
+            <span><span class="legend-line" aria-hidden="true"></span>Recorded coverage</span>
+            <span><span class="legend-circle" aria-hidden="true"></span>Selected observation</span>
+            <span><span class="legend-square" aria-hidden="true"></span>Documentation batch</span>
+            <span><span class="legend-dash" aria-hidden="true"></span>Repository boundary</span>
+          </figcaption>
+        </figure>
+        <div id="history-context" class="context-notes"></div>
+        <p id="history-range" class="small muted"></p>
+        <details class="data-disclosure">
+          <summary>View the history as a data table</summary>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="Recorded coverage history table">
+            <table class="history-table">
+              <caption id="history-caption"></caption>
+              <thead><tr><th scope="col">Observation · UTC</th><th scope="col">Source</th><th scope="col">Recorded / listed</th><th scope="col">Coverage</th><th scope="col">Net recorded change</th></tr></thead>
+              <tbody id="history-rows"></tbody>
+            </table>
+          </div>
+          <p class="small muted">Monthly rows are cutoff observations; the latest row is separate.
+            Net changes include catalog additions and removals, not only newly referenced existing entries.</p>
+        </details>
+      </section>
 
-<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
-<script src="dashboard.js"></script>
+      <section class="detail-section" aria-labelledby="pace-heading">
+        <div class="section-heading">
+          <h3 id="pace-heading" tabindex="-1">Recording pace</h3>
+        </div>
+        <p id="period-caption" class="period-caption"></p>
+        <div class="analysis-grid">
+          <div class="pace-analysis">
+            <h4>Same entries, adjacent windows</h4>
+            <div id="pace-unavailable" class="empty-state" hidden></div>
+            <div id="pace-available">
+              <dl class="pace-comparison">
+                <div><dt>Previous window <span id="prior-period" class="small muted"></span></dt><dd><strong id="prior-pace"></strong><span>net entries / month</span></dd><dd id="prior-counts" class="small muted"></dd></div>
+                <div class="recent-pace"><dt>Recent window <span id="recent-period" class="small muted"></span></dt><dd><strong id="recent-pace"></strong><span>net entries / month</span></dd><dd id="recent-counts" class="small muted"></dd></div>
+              </dl>
+              <p id="pace-difference" class="pace-difference"></p>
+              <p id="cohort-caption" class="small muted"></p>
+              <a class="small" href="#comparison-methods">How cohorts and exclusions work</a>
+            </div>
+          </div>
+          <div class="flow-analysis">
+            <h4>Full catalog: what moved?</h4>
+            <p class="small muted">The recent closed window, including catalog edits.</p>
+            <p id="flow-unavailable" class="empty-state" hidden></p>
+            <dl id="flow-values" class="flow-values"></dl>
+            <p id="flow-reconciliation" class="small"></p>
+            <p id="flow-context" class="small muted"></p>
+          </div>
+        </div>
+        <details id="partial-month" class="data-disclosure" hidden>
+          <summary id="partial-title">Latest-only changes since the last monthly cutoff</summary>
+          <p id="partial-description" class="small"></p>
+        </details>
+      </section>
+    </details>
+
+    <details id="evidence-section" class="panel workspace-disclosure">
+      <summary><h2 id="evidence-heading" tabindex="-1">Look behind the numbers
+        <span class="disclosure-hint">Entries, references, and source commits</span></h2></summary>
+      <p id="evidence-context" class="small muted"></p>
+      <div class="filter-grid evidence-filters">
+        <div class="field"><label for="evidence-subject">Subject evidence</label><select id="evidence-subject"></select></div>
+        <div class="field"><label for="evidence-status">Recorded evidence class</label><select id="evidence-status">
+          <option value="all">All evidence classes</option>
+          <option value="covered">Has a repository reference</option>
+          <option value="not-covered">No repository reference</option>
+          <option value="declaration">Declaration reference</option>
+          <option value="module">Module reference</option>
+          <option value="external">External reference only</option>
+          <option value="reported">Reported elsewhere / unlocated</option>
+          <option value="statement">Statement only</option>
+          <option value="qualified">Qualified / ambiguous</option>
+          <option value="unlinked">No recorded reference</option>
+        </select></div>
+        <div class="field"><label for="evidence-search">Find an entry or reference</label><input id="evidence-search" type="search" placeholder="Topic, declaration, or note" autocomplete="off"></div>
+      </div>
+      <details class="status-disclosure">
+        <summary>Evidence classes and counts</summary>
+        <dl id="status-inventory" class="status-inventory"></dl>
+      </details>
+      <ul id="evidence-list" class="evidence-list"></ul>
+      <div class="list-footer">
+        <p id="evidence-count" class="small muted" role="status"></p>
+        <button id="evidence-more" class="secondary-button" type="button" hidden>Show more entries</button>
+      </div>
+
+      <details id="events-section" class="event-section">
+        <summary><h3 id="events-heading" tabindex="-1">Catalog commits</h3></summary>
+        <p id="event-subject-context" class="small muted"></p>
+        <div class="field event-picker"><label for="event-select">Inspect a catalog commit · most recent first</label><select id="event-select"></select></div>
+        <p id="event-empty" class="empty-state" hidden>No catalog events are available for this subject at this observation.</p>
+        <div id="event-detail">
+          <div class="event-heading"><h4 id="event-summary"></h4><span id="event-context" class="badge"></span></div>
+          <p id="event-provenance" class="small muted"></p>
+          <p id="event-baseline" class="notice" hidden>This is the initial catalog inventory, not a burst of newly formalized results.</p>
+          <p id="event-counts" class="small"></p>
+          <p class="small muted">A gain changes an existing entry to a repository reference. Additions, removals, and evidence or label edits are separate.
+            Lean source changes in the same commit are context, not evidence of causation.</p>
+          <ul id="event-changes" class="evidence-list change-list"></ul>
+          <div class="list-footer">
+            <p id="event-change-count" class="small muted" role="status"></p>
+            <button id="event-more" class="secondary-button" type="button" hidden>Show more changes</button>
+          </div>
+      </details>
+      </div>
+    </details>
+
+    <section id="methodology" class="methodology" aria-labelledby="methodology-heading">
+      <h2 id="methodology-heading">Methods &amp; sources</h2>
+      <details>
+        <summary>What counts as coverage</summary>
+        <div id="benchmark-methods" tabindex="-1"></div>
+        <p>Covered means a recorded declaration or internal module reference. The named-theorem repository scope can include
+          Archive and Counterexamples. A reference is not an independent audit of every proof or the full scope of a syllabus topic.
+          Missing references do not establish absence from mathlib. The benchmarks have separate denominators; there is no combined score.</p>
+        <p>External references, reports elsewhere or without a located repository reference, statement-only records,
+          qualified records, and unlinked entries remain separate. An author name or a reported date is not sufficient to count a repository reference.</p>
+        <p>Subject labels for named theorems use one pinned MSC taxonomy across history. That does not claim those were the historical classifications.
+          The denominator remains the mathlib mirror, with unmatched entries retained rather than silently dropped.</p>
+      </details>
+      <details id="comparison-methods">
+        <summary>How comparisons work</summary>
+        <p>All cutoffs are in UTC. The observation cutoff, the source file’s commit timestamp, the upstream source head,
+          and the data generation time are different dates. Monthly snapshots are observations of a curated catalog;
+          a monthly cutoff excludes events exactly at that instant, while the latest observation includes its cutoff instant.
+          The latest observation can also include a partial month.</p>
+        <p>The 3-, 6-, and 12-month comparisons use adjacent complete-calendar-month windows and the same identities continuously present throughout both.
+          Excluded counts include historical identities seen anywhere during the paired period but outside the common cohort,
+          not just entries in the selected observation’s catalog.
+          Missing history or a missing common subject cohort is unavailable, never zero.
+          The displayed boundaries come from the data’s closed window, not from the date of the latest snapshot.
+          Intervals include their start cutoff and exclude their end cutoff: 1 March to 1 September covers March through August.</p>
+        <p>Same-cohort net change is reference gains minus losses. Net entries per month divides that count by the number of calendar months.
+          Percentage-point change divides the net count by the common cohort, not by today’s changing catalog size.</p>
+        <p>Full-catalog change also includes referenced additions and removals. Renames and reference-format edits are not automatically gains.
+          Initial catalog population is a baseline; documentation batches and repository-port boundaries are not proof-production bursts.
+          Recording can arrive long after formalization, so recording dates cannot identify when a proof was completed.</p>
+        <p>Historical evidence is replayed through the chosen observation. Declaration names and relative module paths are shown as recorded,
+          alongside a source YAML link pinned to that revision. We do not guess declaration URLs or silently substitute current evidence.
+          External reference destinations may have changed since they were recorded. Reported dates retain their original precision.</p>
+      </details>
+      <details>
+        <summary>Sources &amp; data-quality notes</summary>
+        <p id="generation-detail"></p>
+        <ul id="source-list" class="source-list"></ul>
+        <div id="diagnostics"></div>
+      </details>
+    </section>
+  </main>
+
+  <footer class="page-footer">
+    <p class="small muted">Community-maintained catalogs from
+      <a href="https://github.com/leanprover-community/mathlib">mathlib (Lean 3)</a> and
+      <a href="https://github.com/leanprover-community/mathlib4">mathlib4 (Lean 4)</a>.</p>
+  </footer>
+  <script id="chart-library" async src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <script type="module" src="dashboard.js"></script>
 </body>
 </html>

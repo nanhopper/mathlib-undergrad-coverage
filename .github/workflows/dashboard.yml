@@ -1,9 +1,15 @@
-name: Undergraduate coverage dashboard
+name: Mathlib coverage dashboard
 
 on:
   schedule:
     - cron: '0 4 * * 1'
   workflow_dispatch:
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - 'web/**'
+      - 'tests/**'
+      - '.github/workflows/dashboard.yml'
   push:
     branches: [main]
     paths:
@@ -16,13 +22,14 @@ on:
 permissions: {}
 
 concurrency:
-  group: undergrad-dashboard
+  # PR validation must not replace a pending main-branch publication.
+  group: undergrad-dashboard-${{ github.ref }}
   # Never cancel a run that may be midway through a Pages deployment.
   cancel-in-progress: false
 
 jobs:
   test:
-    name: Test the extractor
+    name: Validate coverage and frontend models
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -37,9 +44,18 @@ jobs:
 
       - run: python -m pytest tests/ -q
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: node --test tests/dashboard-model.test.mjs
+
+      - run: python scripts/validate_coverage.py web/data.json
+
   build:
     name: Build the dashboard
     needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write  # commit the refreshed data back to the repository
@@ -52,18 +68,14 @@ jobs:
 
       - run: pip install pyyaml
 
-      # The clone is a blobless partial clone of upstream mathlib4; caching it
-      # avoids re-downloading the history and the file blobs every week.
-      - name: Restore the mathlib clone
+      - name: Restore the upstream caches
         uses: actions/cache@v4
         with:
           path: .mathlib-cache
-          key: mathlib-clone-v1-${{ github.run_id }}
-          restore-keys: mathlib-clone-v1-
+          key: coverage-sources-v2-${{ github.run_id }}
+          restore-keys: coverage-sources-v2-
 
-      # Coverage is read from upstream mathlib4, never from this repository, so
-      # the published numbers cannot go stale if this repo is not updated.
-      - name: Extract the coverage history from upstream mathlib and mathlib4
+      - name: Extract both coverage benchmarks from pinned upstream revisions
         run: |
           python3 scripts/extract_undergrad_history.py \
             --clone \
@@ -79,30 +91,16 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # A dispatched or queued run checks out the commit it was triggered
-          # at, which may predate another run's data refresh, so the push can
-          # be rejected. web/data.json is a generated artifact rather than
-          # authored content, so there is nothing to merge and rebasing only
-          # produces a conflict: the freshly computed copy simply wins. Replay
-          # it on top of whatever the remote now holds instead.
-          cp web/data.json "$RUNNER_TEMP/data.json"
-          for attempt in 1 2 3; do
-            git add web/data.json
-            if git diff --cached --quiet; then
-              echo "no change to commit"
-              exit 0
-            fi
-            git commit -m "chore: refresh undergraduate coverage data"
-            if git push; then
-              exit 0
-            fi
-            echo "push rejected; replaying onto origin/$GITHUB_REF_NAME (attempt $attempt)"
-            git fetch origin "$GITHUB_REF_NAME"
-            git reset --hard "origin/$GITHUB_REF_NAME"
-            cp "$RUNNER_TEMP/data.json" web/data.json
-          done
-          echo "could not push the refreshed data after 3 attempts" >&2
-          exit 1
+          git add web/data.json
+          if git diff --cached --quiet; then
+            echo "no change to commit"
+            exit 0
+          fi
+          git commit -m "chore: refresh mathematical coverage data"
+          # Never replay an old-schema artifact onto different producer/UI code.
+          # A rejected push leaves the last good deployment intact; rerun from
+          # the newer main revision instead.
+          git push origin HEAD:main
 
       - name: Upload the dashboard
         uses: actions/upload-pages-artifact@v3
@@ -126,7 +124,7 @@ jobs:
   report-failure:
     name: Report a failure
     needs: [test, build, deploy]
-    if: failure()
+    if: failure() && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       issues: write
