@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   DataValidationError, STATUS_KEYS, benchmarkFor, changesAt, eventsForSubject,
-  filterRecords, formatClosedMonths, formatCount, formatDate, formatPercent, formatSigned, observationAge,
-  replayRecords, safeHttpUrl, snapshotsFor, sourceFileUrl, subjectRows, validatePayload, windowFor,
+  filterRecords, fittedPercentageDomain, formatClosedMonths, formatCount, formatDate, formatPercent, formatSigned,
+  historyPoints, observationAge, replayRecords, safeHttpUrl, snapshotIndexForObservation, snapshotsFor,
+  sourceFileUrl, subjectRows, validatePayload, windowFor,
 } from "../web/dashboard-model.js";
 
 const sha = (letter) => letter.repeat(40);
@@ -431,6 +432,38 @@ test("window selection uses the explicit closed period, not the partial latest d
   assert.throws(() => windowFor(item.latest, 9), /3-, 6-, or 12-month/);
 });
 
+test("history points preserve complete observations, deltas, and subject gaps", () => {
+  const item = fixture().benchmarks[0];
+  const overall = historyPoints(item);
+  assert.equal(overall.length, 3);
+  assert.deepEqual(overall.map((point) => point.delta_covered), [null, 1, -2]);
+  assert.ok(overall.every((point) => point.available));
+  assert.equal(overall.at(-1).snapshot, item.latest);
+
+  const later = historyPoints(item, "later");
+  assert.deepEqual(later.map((point) => point.available), [false, false, true]);
+  assert.deepEqual(later.map((point) => point.delta_covered), [null, null, null]);
+  assert.equal(later.at(-1).percentage, 0);
+  assert.throws(() => historyPoints(item, "missing"), /Unknown subject/);
+});
+
+test("fitted percentage domains expose change while remaining bounded and readable", () => {
+  assert.deepEqual(fittedPercentageDomain([{ percentage: 2.8 }, { percentage: 17.8 }]), [0, 25]);
+  assert.deepEqual(fittedPercentageDomain([41.8, 70.5]), [35, 75]);
+  assert.deepEqual(fittedPercentageDomain([50, 50]), [45, 55]);
+  assert.deepEqual(fittedPercentageDomain([0, 1]), [0, 10]);
+  assert.deepEqual(fittedPercentageDomain([98, 100]), [90, 100]);
+  assert.deepEqual(fittedPercentageDomain([{ percentage: null }]), [0, 100]);
+});
+
+test("observation lookup maps graph selections to the shared snapshot index", () => {
+  const item = fixture().benchmarks[0];
+  assert.equal(snapshotIndexForObservation(item, item.timeline[0].as_of), 0);
+  assert.equal(snapshotIndexForObservation(item, item.latest.as_of), 2);
+  assert.throws(() => snapshotIndexForObservation(item, "not-a-date"), /valid timestamp/);
+  assert.throws(() => snapshotIndexForObservation(item, "2020-01-01T00:00:00Z"), /Unknown observation/);
+});
+
 test("historical exclusions are preserved rather than derived from the selected catalog size", () => {
   const data = validatePayload(fixture());
   const snapshot = data.benchmarks[0].latest;
@@ -504,7 +537,7 @@ test("compact periods omit repeated years without hiding cross-year or unavailab
   assert.throws(() => formatClosedMonths("2026-09-01", "2026-03-01", compact), /end after/);
 });
 
-test("initial markup leads with controls and subjects, with research tools closed", () => {
+test("initial markup leads with controls and visible history, while advanced tools stay closed", () => {
   const html = readFileSync(new URL("../web/index.html", import.meta.url), "utf8");
   const element = (tag, id) => {
     const found = [...html.matchAll(new RegExp(`<${tag}\\b[^>]*>`, "g"))]
@@ -513,16 +546,22 @@ test("initial markup leads with controls and subjects, with research tools close
     return found;
   };
   const explorer = element("section", "explorer");
+  const analysis = element("section", "analysis-section");
   const subjects = element("section", "subjects-section");
-  const analysis = element("details", "analysis-section");
+  const pace = element("details", "pace-section");
   const evidence = element("details", "evidence-section");
   const commits = element("details", "events-section");
-  assert.ok(explorer.index < subjects.index);
-  assert.ok(subjects.index < analysis.index);
+  assert.ok(explorer.index < analysis.index);
+  assert.ok(analysis.index < subjects.index);
   assert.ok(analysis.index < evidence.index);
-  for (const [opening] of [analysis, evidence, commits]) {
-    assert.doesNotMatch(opening, /\sopen\b/, "research workspaces must start closed");
+  for (const [opening] of [pace, evidence, commits]) {
+    assert.doesNotMatch(opening, /\sopen\b/, "advanced workspaces must start closed");
   }
+  const globalControls = html.slice(explorer.index, analysis.index);
+  assert.doesNotMatch(globalControls, /name="pace-window"/);
+  assert.match(html.slice(pace.index, subjects.index), /name="pace-window"/);
+  assert.match(globalControls, /id="benchmark-select"/);
+  assert.match(globalControls, /id="observation-select"/);
 });
 
 test("observation-age context is explicit, including old and future observations", () => {
