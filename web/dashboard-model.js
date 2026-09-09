@@ -332,6 +332,61 @@ export function snapshotsFor(benchmark) {
   return [...benchmark.timeline, benchmark.latest];
 }
 
+export function historyPoints(benchmark, subject = null) {
+  if (subject !== null) {
+    requireValue(benchmark.subjects.some((item) => item.id === subject), `Unknown subject: ${subject}.`);
+  }
+  let previous = null;
+  return snapshotsFor(benchmark).map((snapshot, index) => {
+    const summary = subject === null
+      ? snapshot.overall
+      : has(snapshot.subjects, subject) ? snapshot.subjects[subject] : null;
+    const point = {
+      index,
+      snapshot,
+      as_of: snapshot.as_of,
+      kind: snapshot.kind,
+      source: snapshot.source,
+      available: summary !== null,
+      covered: summary?.covered ?? null,
+      total: summary?.total ?? null,
+      percentage: summary?.percentage ?? null,
+      delta_covered: summary !== null && previous !== null ? summary.covered - previous.covered : null,
+    };
+    previous = summary;
+    return point;
+  });
+}
+
+export function fittedPercentageDomain(points) {
+  const values = points.map((point) => typeof point === "number" ? point : point?.percentage)
+    .filter((value) => Number.isFinite(value));
+  if (!values.length) return [0, 100];
+  const minimum = Math.min(...values);
+  const maximum = Math.max(...values);
+  const span = maximum - minimum;
+  const padding = Math.max(2.5, span * 0.12);
+  let lower = Math.max(0, Math.floor((minimum - padding) / 5) * 5);
+  let upper = Math.min(100, Math.ceil((maximum + padding) / 5) * 5);
+  if (upper - lower < 10) {
+    if (lower === 0) upper = Math.min(100, lower + 10);
+    else if (upper === 100) lower = Math.max(0, upper - 10);
+    else {
+      lower = Math.max(0, lower - 5);
+      upper = Math.min(100, upper + 5);
+    }
+  }
+  return [lower, upper];
+}
+
+export function snapshotIndexForObservation(benchmark, observation) {
+  const target = Date.parse(observation);
+  requireValue(Number.isFinite(target), "Observation must be a valid timestamp.");
+  const index = snapshotsFor(benchmark).findIndex((snapshot) => Date.parse(snapshot.as_of) === target);
+  requireValue(index >= 0, `Unknown observation: ${observation}.`);
+  return index;
+}
+
 export function windowFor(snapshot, months = 6) {
   requireValue(WINDOW_MONTHS.includes(Number(months)), "Choose a 3-, 6-, or 12-month window.");
   const window = snapshot.windows[String(months)];

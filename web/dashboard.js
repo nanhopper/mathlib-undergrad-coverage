@@ -1,14 +1,15 @@
 import {
   DataValidationError, STATUS_INFO, STATUS_KEYS, benchmarkFor, changesAt, eventsForSubject,
-  filterRecords, formatClosedMonths, formatCount, formatDate, formatPercent, formatSigned, formatTimestamp,
-  observationAge, replayRecords, safeHttpUrl, snapshotsFor, sourceFileUrl, subjectRows,
-  validatePayload, windowFor,
+  filterRecords, fittedPercentageDomain, formatClosedMonths, formatCount, formatDate, formatPercent, formatSigned,
+  formatTimestamp, historyPoints, observationAge, replayRecords, safeHttpUrl, snapshotsFor, sourceFileUrl,
+  subjectRows, validatePayload, windowFor,
 } from "./dashboard-model.js";
 
 const PAGE_SIZE = 12;
+const SUBJECT_PAGE_SIZE = 8;
 const $ = (id) => document.getElementById(id);
 const state = {
-  data: null, benchmarkId: "named", snapshotIndex: 0, months: 6, records: [],
+  data: null, benchmarkId: "named", snapshotIndex: 0, paceMonths: 6, historyScale: "fit", records: [],
   subjectQuery: "", subjectSort: "gaps", allSubjects: false,
   evidenceSubject: "", evidenceStatus: "all", evidenceQuery: "", evidenceLimit: PAGE_SIZE,
   eventIndex: null, eventLimit: PAGE_SIZE, chartsAvailable: false,
@@ -84,7 +85,13 @@ function selected() {
   const benchmark = benchmarkFor(state.data, state.benchmarkId);
   const snapshots = snapshotsFor(benchmark);
   const snapshot = snapshots[state.snapshotIndex];
-  return { benchmark, snapshots, snapshot, window: windowFor(snapshot, state.months) };
+  return {
+    benchmark,
+    snapshots,
+    snapshot,
+    subjectWindow: windowFor(snapshot, 6),
+    paceWindow: windowFor(snapshot, state.paceMonths),
+  };
 }
 
 function countLabel(summary) {
@@ -100,6 +107,40 @@ function revisionUrl(source) {
   return url ? `${url.replace(/\/$/, "").replace(/\.git$/, "")}/tree/${source.head}` : null;
 }
 
+function drawOverviewSparklines() {
+  if (!state.data) return;
+  for (const benchmark of state.data.benchmarks) {
+    const button = $(`${benchmark.id}-sparkline-action`);
+    button.hidden = !state.chartsAvailable;
+    if (!state.chartsAvailable) continue;
+    const d3 = globalThis.d3;
+    const points = historyPoints(benchmark).filter((point) => point.available);
+    const width = 320;
+    const height = 44;
+    const margin = { top: 5, right: 6, bottom: 5, left: 6 };
+    const svg = d3.select($(`${benchmark.id}-sparkline`));
+    svg.selectAll("*").remove();
+    svg.attr("viewBox", `0 0 ${width} ${height}`);
+    const titleId = `${benchmark.id}-sparkline-title`;
+    const descriptionId = `${benchmark.id}-sparkline-description`;
+    const first = points[0];
+    const latest = points.at(-1);
+    svg.attr("aria-labelledby", `${titleId} ${descriptionId}`);
+    svg.append("title").attr("id", titleId).text(`${benchmark.title}: recorded coverage trend`);
+    svg.append("desc").attr("id", descriptionId).text(
+      `${formatPercent(first.percentage)} on ${formatDate(first.as_of)} to ${formatPercent(latest.percentage)} on ${formatDate(latest.as_of)}, across ${points.length} observations.`);
+    let dateDomain = d3.extent(points, (point) => new Date(point.as_of));
+    if (+dateDomain[0] === +dateDomain[1]) dateDomain = [new Date(+dateDomain[0] - 86_400_000), new Date(+dateDomain[1] + 86_400_000)];
+    const x = d3.scaleUtc().domain(dateDomain).range([margin.left, width - margin.right]);
+    const y = d3.scaleLinear().domain(fittedPercentageDomain(points)).range([height - margin.bottom, margin.top]);
+    svg.append("path").datum(points).attr("class", "sparkline-line")
+      .attr("d", d3.line().curve(d3.curveStepAfter)
+        .x((point) => x(new Date(point.as_of))).y((point) => y(point.percentage)));
+    svg.append("circle").attr("class", "sparkline-end").attr("r", 3.5)
+      .attr("cx", x(new Date(latest.as_of))).attr("cy", y(latest.percentage));
+  }
+}
+
 function renderOverview() {
   for (const benchmark of state.data.benchmarks) {
     const { id, latest } = benchmark;
@@ -107,6 +148,11 @@ function renderOverview() {
     setText(`${id}-percentage`, formatPercent(latest.overall.percentage));
     setText(`${id}-count`, `${formatCount(latest.overall.covered)} of ${formatCount(latest.overall.total)} listed entries`);
     bar($(`${id}-bar`), latest.overall.percentage);
+    const points = historyPoints(benchmark).filter((point) => point.available);
+    const first = points[0];
+    const last = points.at(-1);
+    setText(`${id}-trend-summary`,
+      `${formatPercent(first.percentage)} → ${formatPercent(last.percentage)} · ${formatSigned(last.percentage - first.percentage, 1)} pp since ${formatDate(first.as_of)}`);
     const pace = windowFor(latest, 6);
     const headline = $(`${id}-pace`);
     headline.replaceChildren(document.createTextNode("6-mo pace: "));
@@ -130,6 +176,7 @@ function renderOverview() {
     $("source-status").title = `Source head committed ${formatTimestamp(activeSource.head_date)}. Full revisions and timestamps are under Methods & sources.`;
   }
   for (const item of $("benchmark-select").options) item.textContent = benchmarkFor(state.data, item.value).title;
+  drawOverviewSparklines();
 }
 
 function renderObservationOptions() {
@@ -174,52 +221,196 @@ function setChartAvailability(available) {
   $("chart-unavailable").hidden = available;
 }
 
+function historyPointText(point, subjectLabel = null) {
+  if (!point.available) return `${formatDate(point.as_of)} · ${subjectLabel ?? "Subject"} was not listed at this observation.`;
+  const change = point.delta_covered === null
+    ? "Baseline observation"
+    : `${formatSigned(point.delta_covered)} recorded ${Math.abs(point.delta_covered) === 1 ? "entry" : "entries"} since the previous observation`;
+  return `${formatDate(point.as_of)} · ${formatCount(point.covered)} / ${formatCount(point.total)} recorded · `
+    + `${formatPercent(point.percentage)} · ${change} · ${point.source}. Catalog observation, not proof date.`;
+}
+
+function selectObservation(index, {
+  focusChartPoint = false, focusHistoryRow = false, focusSubjectPoint = false, announce = true,
+} = {}) {
+  const { snapshots } = selected();
+  if (!Number.isInteger(index) || index < 0 || index >= snapshots.length || index === state.snapshotIndex) return;
+  state.snapshotIndex = index;
+  state.eventIndex = null;
+  state.eventLimit = PAGE_SIZE;
+  state.evidenceLimit = PAGE_SIZE;
+  renderSelected();
+  if (announce) {
+    const { benchmark, snapshot } = selected();
+    setText("history-selection-status", `Selected ${formatDate(snapshot.as_of)} for ${benchmark.title}.`);
+  }
+  if (focusChartPoint || focusHistoryRow || focusSubjectPoint) {
+    requestAnimationFrame(() => {
+      const container = focusHistoryRow ? $("history-rows")
+        : focusSubjectPoint ? $("subject-history-chart") : $("history-chart");
+      container?.querySelector(`[data-snapshot-index="${index}"]`)?.focus();
+    });
+  }
+}
+
+function eventObservationIndex(benchmark, eventIndex) {
+  const snapshots = snapshotsFor(benchmark);
+  const index = snapshots.findIndex((snapshot) => snapshot.event_index >= eventIndex);
+  return index < 0 ? snapshots.length - 1 : index;
+}
+
+function inspectHistoryEvent(eventIndex) {
+  const benchmark = benchmarkFor(state.data, state.benchmarkId);
+  selectObservation(eventObservationIndex(benchmark, eventIndex), { announce: false });
+  state.evidenceSubject = "";
+  state.eventIndex = eventIndex;
+  state.eventLimit = PAGE_SIZE;
+  $("evidence-subject").value = "";
+  renderEvidence();
+  renderEvents();
+  revealSection("events-heading");
+}
+
+function setHistoryPointDetail(point) {
+  setText("history-point-detail", historyPointText(point));
+}
+
+function nearestChartPoint(event, svg, x, width, points) {
+  const bounds = svg.getBoundingClientRect();
+  const chartX = (event.clientX - bounds.left) / bounds.width * width;
+  const target = +x.invert(chartX);
+  return points.reduce((nearest, point) =>
+    Math.abs(Date.parse(point.as_of) - target) < Math.abs(Date.parse(nearest.as_of) - target) ? point : nearest);
+}
+
+function showHistoryTooltip(point, chartX, chartY, width, height) {
+  const tooltip = $("history-tooltip");
+  const svg = $("history-chart");
+  const bounds = svg.getBoundingClientRect();
+  tooltip.replaceChildren(
+    node("strong", `${formatDate(point.as_of)} · ${point.kind === "latest" ? "Latest" : "Monthly cutoff"}`),
+    node("span", historyPointText(point)),
+  );
+  tooltip.hidden = false;
+  const x = chartX / width * bounds.width;
+  const y = chartY / height * bounds.height;
+  const halfWidth = tooltip.offsetWidth / 2;
+  const minimumLeft = Math.min(bounds.width / 2, halfWidth + 8);
+  const maximumLeft = Math.max(minimumLeft, bounds.width - halfWidth - 8);
+  const left = Math.min(Math.max(x, minimumLeft), maximumLeft);
+  tooltip.classList.toggle("is-below", y - tooltip.offsetHeight - 10 < 0);
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${y}px`;
+  setHistoryPointDetail(point);
+}
+
+function hideHistoryTooltip() {
+  const tooltip = $("history-tooltip");
+  tooltip.hidden = true;
+  tooltip.classList.remove("is-below");
+  const point = historyPoints(benchmarkFor(state.data, state.benchmarkId))[state.snapshotIndex];
+  setHistoryPointDetail(point);
+}
+
 function drawHistory() {
   if (!state.data) return;
   setChartAvailability(state.chartsAvailable);
-  if (!state.chartsAvailable || !$("analysis-section").open) return;
+  if (!state.chartsAvailable) return;
   try {
     const d3 = globalThis.d3;
-    const { benchmark, snapshots, snapshot } = selected();
-    const series = snapshots.slice(0, state.snapshotIndex + 1);
-    const points = series.map((entry) => ({ date: new Date(entry.as_of), value: entry.overall.percentage }));
+    const { benchmark, snapshot } = selected();
+    const points = historyPoints(benchmark);
+    const selectedPoint = points[state.snapshotIndex];
     const width = Math.max(280, $("history-chart").parentElement.clientWidth || 900);
-    const height = width < 500 ? 260 : 300;
-    const margin = { top: 32, right: 18, bottom: 38, left: 45 };
+    const height = width < 500 ? 280 : 330;
+    const margin = { top: 32, right: 20, bottom: 42, left: 52 };
     const svg = d3.select($("history-chart"));
+    $("history-tooltip").hidden = true;
     svg.selectAll("*").remove();
     svg.attr("viewBox", `0 0 ${width} ${height}`);
     svg.append("title").attr("id", "history-chart-title").text(`${benchmark.title}: recorded coverage history`);
     svg.append("desc").attr("id", "history-chart-description").text(
-      `${series.length} observations through ${formatDate(snapshot.as_of)}. Selected: ${countLabel(snapshot.overall)} entries, ${formatPercent(snapshot.overall.percentage)}. `
-      + "A stepped line joins observed percentages on a zero to 100 percent scale; it does not interpolate proof dates. The full data table follows.");
-    let domain = d3.extent(points, (point) => point.date);
+      `${points.length} published observations. Selected: ${formatDate(snapshot.as_of)}, ${countLabel(snapshot.overall)} entries, ${formatPercent(snapshot.overall.percentage)}. `
+      + `A stepped line uses a ${state.historyScale === "fit" ? "fitted" : "zero to 100 percent"} scale. Later published history remains visible after historical selection. `
+      + "Observation dates are not proof dates. The full data table follows.");
+    let domain = d3.extent(points, (point) => new Date(point.as_of));
     if (+domain[0] === +domain[1]) domain = [new Date(+domain[0] - 86_400_000), new Date(+domain[1] + 86_400_000)];
     const x = d3.scaleUtc().domain(domain).range([margin.left, width - margin.right]);
-    const y = d3.scaleLinear().domain([0, 100]).range([height - margin.bottom, margin.top]);
+    const yDomain = state.historyScale === "absolute" ? [0, 100] : fittedPercentageDomain(points);
+    const y = d3.scaleLinear().domain(yDomain).range([height - margin.bottom, margin.top]);
+    const yTicks = y.ticks(5);
+    setText("history-scale-note", state.historyScale === "absolute"
+      ? "Showing the share of the full 0–100% catalog range."
+      : `Fitted to ${formatCount(yDomain[0])}–${formatCount(yDomain[1])}% so recorded changes remain visible.`);
     svg.append("g").attr("class", "chart-grid").attr("transform", `translate(${margin.left},0)`)
-      .call(d3.axisLeft(y).tickValues([0, 25, 50, 75, 100]).tickSize(-(width - margin.left - margin.right)).tickFormat(""));
+      .call(d3.axisLeft(y).tickValues(yTicks).tickSize(-(width - margin.left - margin.right)).tickFormat(""));
     svg.append("g").attr("class", "chart-axis").attr("transform", `translate(0,${height - margin.bottom})`)
-      .call(d3.axisBottom(x).ticks(width < 500 ? 3 : 6).tickSizeOuter(0).tickFormat(d3.utcFormat(series.length === 1 ? "%d %b" : "%b %Y")));
+      .call(d3.axisBottom(x).ticks(width < 500 ? 3 : 6).tickSizeOuter(0).tickFormat(d3.utcFormat(points.length === 1 ? "%d %b" : "%b %Y")));
     svg.append("g").attr("class", "chart-axis").attr("transform", `translate(${margin.left},0)`)
-      .call(d3.axisLeft(y).tickValues([0, 25, 50, 75, 100]).tickSizeOuter(0).tickFormat((value) => `${value}%`));
-    benchmark.events.slice(0, snapshot.event_index + 1).forEach((event, index) => {
-      if (index === 0 || event.source === benchmark.events[index - 1].source || Date.parse(event.at) < +points[0].date) return;
+      .call(d3.axisLeft(y).tickValues(yTicks).tickSizeOuter(0).tickFormat((value) => `${value}%`));
+    benchmark.events.forEach((event, index) => {
+      if (index === 0 || event.source === benchmark.events[index - 1].source
+        || Date.parse(event.at) < Date.parse(points[0].as_of) || Date.parse(event.at) > Date.parse(points.at(-1).as_of)) return;
       const position = x(new Date(event.at));
       svg.append("line").attr("class", "source-boundary").attr("x1", position).attr("x2", position)
         .attr("y1", margin.top).attr("y2", height - margin.bottom);
       svg.append("text").attr("class", "source-boundary-label").attr("x", position + 4).attr("y", 12).text(event.source);
     });
-    svg.append("path").datum(points).attr("class", "coverage-line")
-      .attr("d", d3.line().curve(d3.curveStepAfter).x((point) => x(point.date)).y((point) => y(point.value)));
-    svg.selectAll(".coverage-point").data(points).join("circle").attr("class", "coverage-point")
-      .attr("cx", (point) => x(point.date)).attr("cy", (point) => y(point.value)).attr("r", points.length > 60 ? 1.5 : 2);
-    const chosen = points.at(-1);
-    svg.append("circle").attr("class", "selected-point").attr("cx", x(chosen.date)).attr("cy", y(chosen.value)).attr("r", 5);
-    documentationBatches(benchmark, snapshot, +points[0].date).forEach(({ event }) => {
-      svg.append("rect").attr("class", "doc-marker").attr("x", x(new Date(event.at)) - 3.5).attr("y", 19).attr("width", 7).attr("height", 7)
-        .append("title").text(`Documentation-only catalog batch: ${formatDate(event.at)}, ${event.changes.length} record edits. Not a proof date.`);
+    const line = d3.line().curve(d3.curveStepAfter)
+      .x((point) => x(new Date(point.as_of))).y((point) => y(point.percentage));
+    svg.append("path").datum(points).attr("class", "coverage-line coverage-line-context").attr("d", line);
+    svg.append("path").datum(points.slice(0, state.snapshotIndex + 1))
+      .attr("class", "coverage-line coverage-line-selected").attr("d", line);
+    const pointGroups = svg.selectAll(".chart-point").data(points).join("g")
+      .attr("class", "chart-point")
+      .attr("data-snapshot-index", (point) => point.index)
+      .attr("tabindex", 0)
+      .attr("role", "button")
+      .attr("aria-label", (point) => `Select ${historyPointText(point)}`)
+      .on("focus", (_, point) => showHistoryTooltip(
+        point, x(new Date(point.as_of)), y(point.percentage), width, height))
+      .on("blur", hideHistoryTooltip)
+      .on("click", (_, point) => selectObservation(point.index, { focusChartPoint: true }))
+      .on("keydown", (event, point) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        selectObservation(point.index, { focusChartPoint: true });
+      });
+    pointGroups.append("circle")
+      .attr("class", (point) => `coverage-point${point.index > state.snapshotIndex ? " is-future" : ""}`)
+      .attr("cx", (point) => x(new Date(point.as_of))).attr("cy", (point) => y(point.percentage))
+      .attr("r", points.length > 60 ? 1.75 : 2.5);
+    svg.append("circle").attr("class", "selected-point")
+      .attr("cx", x(new Date(selectedPoint.as_of))).attr("cy", y(selectedPoint.percentage)).attr("r", 5.5)
+      .attr("pointer-events", "none");
+    svg.append("rect").attr("class", "chart-pointer-overlay")
+      .attr("x", margin.left).attr("y", margin.top)
+      .attr("width", width - margin.left - margin.right).attr("height", height - margin.top - margin.bottom)
+      .on("mousemove", (event) => {
+        const point = nearestChartPoint(event, svg.node(), x, width, points);
+        showHistoryTooltip(point, x(new Date(point.as_of)), y(point.percentage), width, height);
+      })
+      .on("mouseleave", hideHistoryTooltip)
+      .on("click", (event) => {
+        const point = nearestChartPoint(event, svg.node(), x, width, points);
+        selectObservation(point.index, { focusChartPoint: true });
+      });
+    documentationBatches(benchmark, benchmark.latest, Date.parse(points[0].as_of)).forEach(({ event, index }) => {
+      const position = x(new Date(event.at));
+      const marker = svg.append("g").attr("class", "chart-event").attr("tabindex", 0).attr("role", "button")
+        .attr("aria-label", `Inspect documentation-only catalog batch on ${formatDate(event.at)} with ${formatCount(event.changes.length)} record edits.`)
+        .on("click", () => inspectHistoryEvent(index))
+        .on("keydown", (keyEvent) => {
+          if (keyEvent.key !== "Enter" && keyEvent.key !== " ") return;
+          keyEvent.preventDefault();
+          inspectHistoryEvent(index);
+        });
+      marker.append("line").attr("class", "event-guide").attr("x1", position).attr("x2", position)
+        .attr("y1", margin.top).attr("y2", height - margin.bottom);
+      marker.append("rect").attr("class", "doc-marker").attr("x", position - 4).attr("y", margin.top - 10).attr("width", 8).attr("height", 8);
+      marker.append("title").text(`Documentation-only catalog batch: ${formatDate(event.at)}, ${event.changes.length} record edits. Not a proof date.`);
     });
+    setHistoryPointDetail(selectedPoint);
   } catch (error) {
     console.warn("The coverage chart is unavailable; textual data is still shown.", error);
     state.chartsAvailable = false;
@@ -228,36 +419,34 @@ function drawHistory() {
 }
 
 function renderHistory() {
-  const { benchmark, snapshots, snapshot } = selected();
-  const series = snapshots.slice(0, state.snapshotIndex + 1);
-  setText("history-caption", `${benchmark.title} · observations through ${formatTimestamp(snapshot.as_of)}. Percentages use each row’s own catalog denominator.`);
-  $("history-rows").replaceChildren(...[...series].reverse().map((entry) => {
+  const { benchmark, snapshot } = selected();
+  const points = historyPoints(benchmark);
+  setText("history-caption", `${benchmark.title} · complete published history. Selected observation: ${formatTimestamp(snapshot.as_of)}. Percentages use each row’s own catalog denominator.`);
+  $("history-rows").replaceChildren(...[...points].reverse().map((point) => {
     const row = node("tr");
-    const observation = node("th", formatDate(entry.as_of));
+    row.classList.toggle("is-selected", point.index === state.snapshotIndex);
+    const observation = node("th");
     observation.scope = "row";
-    observation.append(node("span", entry.kind === "latest" ? "Latest / as of" : "Monthly cutoff", "table-subheading"));
-    row.append(observation, node("td", entry.source), node("td", countLabel(entry.overall)),
-      node("td", formatPercent(entry.overall.percentage)), node("td", entry.flow === null ? "Baseline" : formatSigned(entry.flow.net_covered)));
+    const button = node("button", formatDate(point.as_of), "history-row-button");
+    button.type = "button";
+    button.dataset.snapshotIndex = String(point.index);
+    if (point.index === state.snapshotIndex) button.setAttribute("aria-current", "true");
+    button.addEventListener("click", () => selectObservation(point.index, { focusHistoryRow: true }));
+    observation.append(button, node("span", point.kind === "latest" ? "Latest / as of" : "Monthly cutoff", "table-subheading"));
+    row.append(observation, node("td", point.source), node("td", `${formatCount(point.covered)} / ${formatCount(point.total)}`),
+      node("td", formatPercent(point.percentage)), node("td", point.delta_covered === null ? "Baseline" : formatSigned(point.delta_covered)));
     return row;
   }));
   const initial = benchmark.events[0];
-  const batches = documentationBatches(benchmark, snapshot, Date.parse(series[0].as_of));
-  setText("history-range", `${series.length} observation${series.length === 1 ? "" : "s"} shown, through ${formatDate(snapshot.as_of)}. `
+  const batches = documentationBatches(benchmark, benchmark.latest, Date.parse(points[0].as_of));
+  setText("history-range", `${points.length} published observation${points.length === 1 ? "" : "s"} shown. Selected: ${formatDate(snapshot.as_of)}. `
     + `The first catalog event (${formatDate(initial.at)}) is a baseline, not an assumed earlier zero.`
-    + (batches.length ? " Batch markers show up to three of the largest documentation-only commits with at least five record edits." : ""));
+    + (batches.length ? " Event guides show up to three of the largest documentation-only commits with at least five record edits." : ""));
   $("history-context").replaceChildren();
   for (const { event, index } of batches) {
     const button = node("button", `Inspect docs-only batch · ${formatDate(event.at)} · ${formatCount(event.changes.length)} record edits`, "text-button");
     button.type = "button";
-    button.addEventListener("click", () => {
-      state.evidenceSubject = "";
-      state.eventIndex = index;
-      state.eventLimit = PAGE_SIZE;
-      $("evidence-subject").value = "";
-      renderEvidence();
-      renderEvents();
-      revealSection("events-heading");
-    });
+    button.addEventListener("click", () => inspectHistoryEvent(index));
     $("history-context").append(button);
   }
   drawHistory();
@@ -270,13 +459,13 @@ function flowDescription(flow) {
 }
 
 function renderPace() {
-  const { benchmark, snapshot, window } = selected();
+  const { benchmark, snapshot, paceWindow: window } = selected();
   const recentDates = window.start ? `${formatDate(window.start)} → ${formatDate(window.end)}` : `ending ${formatDate(window.end)}`;
   const priorDates = window.prior_start && window.start ? `${formatDate(window.prior_start)} → ${formatDate(window.start)}` : "Unavailable";
   const recentMonths = formatClosedMonths(window.start, window.end, { compact: true });
   setText("period-caption", window.start
-    ? `${window.available ? "Recent" : "Requested"} window: ${recentMonths} · ${state.months} complete months.`
-    : `Closed-window comparison unavailable · ${state.months} months · requested end cutoff ${formatDate(window.end)} UTC.`);
+    ? `${window.available ? "Recent" : "Requested"} window: ${recentMonths} · ${state.paceMonths} complete months.`
+    : `Closed-window comparison unavailable · ${state.paceMonths} months · requested end cutoff ${formatDate(window.end)} UTC.`);
   $("period-caption").title = `UTC cutoffs: ${recentDates}; end excluded.`;
   $("pace-available").hidden = !window.available;
   $("pace-unavailable").hidden = window.available;
@@ -341,21 +530,21 @@ function inspectSubject(id, focus = false) {
   state.eventIndex = null;
   state.eventLimit = PAGE_SIZE;
   $("evidence-subject").value = id;
+  renderSubjectHistory();
   renderEvidence();
   renderEvents();
   if (focus) revealSection("evidence-heading");
 }
 
 function renderSubjects() {
-  const { benchmark, snapshot, window } = selected();
+  const { benchmark, snapshot, subjectWindow: window } = selected();
   const rows = subjectRows(benchmark, snapshot, window, { query: state.subjectQuery, sort: state.subjectSort });
-  const visible = state.allSubjects ? rows : rows.slice(0, PAGE_SIZE);
+  const visible = state.allSubjects ? rows : rows.slice(0, SUBJECT_PAGE_SIZE);
   setText("subjects-caption", `${benchmark.title}: subject coverage at ${formatDate(snapshot.as_of)}. `
-    + `${state.months}-month same-cohort changes end at ${formatDate(window.end)}. Select a subject to inspect its evidence.`);
-  setText("subject-change-heading", `${state.months}-month change`);
+    + `Six-month same-cohort changes end at ${formatDate(window.end)}. Select a subject to inspect its trend and evidence.`);
   setText("subjects-period", window.available
-    ? `Change: ${formatClosedMonths(window.start, window.end, { compact: true })}`
-    : `Change unavailable · ${state.months}-month window`);
+    ? `6-month change: ${formatClosedMonths(window.start, window.end, { compact: true })}`
+    : "6-month change unavailable");
   setText("subject-window-explanation", window.available
     ? `Changes use each subject’s continuously listed cohort, not the selected catalog’s denominator. `
       + `The recent window runs from ${formatDate(window.start)} to ${formatDate(window.end)} UTC, with the end cutoff excluded. Missing cohorts are unavailable.`
@@ -375,17 +564,20 @@ function renderSubjects() {
     name.setAttribute("role", "rowheader");
     const button = node("button", subject.label, "subject-link");
     button.type = "button";
-    button.setAttribute("aria-label", `Inspect evidence for ${subject.label}`);
+    button.setAttribute("aria-label", `Inspect trend and evidence for ${subject.label}`);
     button.setAttribute("aria-controls", "evidence-section");
     const arrow = node("span", "→", "subject-arrow");
     arrow.setAttribute("aria-hidden", "true");
     button.append(arrow);
     button.addEventListener("click", () => inspectSubject(subject.id, true));
     name.append(button);
-    const counts = subjectCell("Recorded / listed");
-    counts.append(node("span", subject.summary ? countLabel(subject.summary) : "Not listed", subject.summary ? "cell-value" : "unavailable"));
     const percentage = subjectCell("Coverage", "coverage-cell");
-    percentage.append(node("span", formatPercent(subject.percentage), subject.percentage === null ? "unavailable" : "cell-value"));
+    const coverageSummary = node("span", null, "coverage-summary");
+    coverageSummary.append(
+      node("strong", subject.summary ? countLabel(subject.summary) : "Not listed"),
+      node("span", formatPercent(subject.percentage), subject.percentage === null ? "unavailable" : "cell-value"),
+    );
+    percentage.append(coverageSummary);
     if (subject.percentage !== null) {
       const track = node("div", null, "coverage-track");
       track.setAttribute("aria-hidden", "true");
@@ -394,7 +586,7 @@ function renderSubjects() {
       track.append(fill);
       percentage.append(track);
     }
-    const change = subjectCell(`${state.months}-month change`);
+    const change = subjectCell("6-month change");
     if (subject.comparison) {
       change.append(node("span", `${formatSigned(subject.change, 1)} pp`, "comparison-value"),
         node("span", `${formatSigned(subject.comparison.recent.net)} entries · ${formatCount(subject.comparison.cohort_size)} in cohort`, "table-subheading"));
@@ -404,16 +596,16 @@ function renderSubjects() {
         change.append(node("span", subject.summary ? "No common subject cohort" : "Not listed at this observation", "table-subheading"));
       }
     }
-    const gap = subjectCell("No repo reference");
+    const gap = subjectCell("No recorded repo reference");
     gap.append(node("span", formatCount(subject.remaining), subject.remaining === null ? "unavailable" : "cell-value"));
-    row.append(name, counts, percentage, change, gap);
+    row.append(name, percentage, change, gap);
     return row;
   }));
   if (rows.length === 0) {
     const row = node("tr");
     row.setAttribute("role", "row");
     const cell = node("td", "No subjects match. Try a broader subject name or MSC code.", "empty-state");
-    cell.colSpan = 5;
+    cell.colSpan = 4;
     cell.setAttribute("role", "cell");
     row.append(cell);
     $("subject-rows").append(row);
@@ -421,9 +613,85 @@ function renderSubjects() {
   const absent = rows.filter((row) => row.summary === null).length;
   setText("subject-count", `Showing ${visible.length} of ${rows.length} matching subjects.`
     + (absent ? ` ${absent} not listed at this observation.` : ""));
-  $("subjects-more").hidden = rows.length <= PAGE_SIZE;
+  $("subjects-more").hidden = rows.length <= SUBJECT_PAGE_SIZE;
   $("subjects-more").setAttribute("aria-expanded", String(state.allSubjects));
-  setText("subjects-more", state.allSubjects ? `Show the first ${PAGE_SIZE} subjects` : `Show all ${rows.length} subjects`);
+  setText("subjects-more", state.allSubjects ? `Show the first ${SUBJECT_PAGE_SIZE} subjects` : `Show all ${rows.length} subjects`);
+}
+
+function renderSubjectHistory() {
+  const section = $("subject-history-section");
+  const { benchmark } = selected();
+  const subject = benchmark.subjects.find((item) => item.id === state.evidenceSubject);
+  section.hidden = !subject;
+  if (!subject) return;
+  const points = historyPoints(benchmark, subject.id);
+  const selectedPoint = points[state.snapshotIndex];
+  setText("subject-history-level", selectedPoint.available
+    ? `${formatCount(selectedPoint.covered)} / ${formatCount(selectedPoint.total)} recorded · ${formatPercent(selectedPoint.percentage)}`
+    : "Not listed at this observation");
+  setText("subject-history-detail", historyPointText(selectedPoint, subject.label));
+  $("subject-history-chart").hidden = !state.chartsAvailable;
+  $("subject-chart-unavailable").hidden = state.chartsAvailable;
+  if (!state.chartsAvailable) return;
+  const d3 = globalThis.d3;
+  const available = points.filter((point) => point.available);
+  const width = Math.max(280, $("subject-history-chart").parentElement.clientWidth || 800);
+  const height = width < 500 ? 190 : 170;
+  const margin = { top: 18, right: 18, bottom: 34, left: 46 };
+  const svg = d3.select($("subject-history-chart"));
+  svg.selectAll("*").remove();
+  svg.attr("viewBox", `0 0 ${width} ${height}`);
+  svg.append("title").attr("id", "subject-history-chart-title").text(`${subject.label}: recorded coverage history`);
+  svg.append("desc").attr("id", "subject-history-chart-description").text(
+    `${available.length} available observations across ${points.length} published dates. Gaps mean the subject was not listed, not zero coverage. `
+    + `Selected: ${historyPointText(selectedPoint, subject.label)}`);
+  let dateDomain = d3.extent(points, (point) => new Date(point.as_of));
+  if (+dateDomain[0] === +dateDomain[1]) dateDomain = [new Date(+dateDomain[0] - 86_400_000), new Date(+dateDomain[1] + 86_400_000)];
+  const x = d3.scaleUtc().domain(dateDomain).range([margin.left, width - margin.right]);
+  const y = d3.scaleLinear().domain(fittedPercentageDomain(available)).range([height - margin.bottom, margin.top]);
+  svg.append("g").attr("class", "chart-axis").attr("transform", `translate(0,${height - margin.bottom})`)
+    .call(d3.axisBottom(x).ticks(width < 500 ? 3 : 5).tickSizeOuter(0).tickFormat(d3.utcFormat("%b %Y")));
+  svg.append("g").attr("class", "chart-axis").attr("transform", `translate(${margin.left},0)`)
+    .call(d3.axisLeft(y).ticks(4).tickSizeOuter(0).tickFormat((value) => `${value}%`));
+  svg.append("line").attr("class", "source-boundary").attr("x1", x(new Date(selectedPoint.as_of))).attr("x2", x(new Date(selectedPoint.as_of)))
+    .attr("y1", margin.top).attr("y2", height - margin.bottom);
+  svg.append("path").datum(points).attr("class", "subject-history-line")
+    .attr("d", d3.line().defined((point) => point.available).curve(d3.curveStepAfter)
+      .x((point) => x(new Date(point.as_of))).y((point) => y(point.percentage)));
+  const pointGroups = svg.selectAll(".subject-chart-point").data(available).join("g")
+    .attr("class", "chart-point subject-chart-point")
+    .attr("data-snapshot-index", (point) => point.index)
+    .attr("tabindex", 0)
+    .attr("role", "button")
+    .attr("aria-label", (point) => `Select ${historyPointText(point, subject.label)}`)
+    .on("focus", (_, point) => setText("subject-history-detail", historyPointText(point, subject.label)))
+    .on("blur", () => setText("subject-history-detail", historyPointText(selectedPoint, subject.label)))
+    .on("click", (_, point) => selectObservation(point.index, { focusSubjectPoint: true }))
+    .on("keydown", (event, point) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      selectObservation(point.index, { focusSubjectPoint: true });
+    });
+  pointGroups.append("circle").attr("class", "coverage-point")
+    .attr("cx", (point) => x(new Date(point.as_of))).attr("cy", (point) => y(point.percentage)).attr("r", available.length > 60 ? 1.75 : 2.5);
+  if (selectedPoint.available) {
+    svg.append("circle").attr("class", "selected-point").attr("pointer-events", "none")
+      .attr("cx", x(new Date(selectedPoint.as_of))).attr("cy", y(selectedPoint.percentage)).attr("r", 5);
+  }
+  if (available.length) {
+    svg.append("rect").attr("class", "chart-pointer-overlay")
+      .attr("x", margin.left).attr("y", margin.top)
+      .attr("width", width - margin.left - margin.right).attr("height", height - margin.top - margin.bottom)
+      .on("mousemove", (event) => {
+        const point = nearestChartPoint(event, svg.node(), x, width, available);
+        setText("subject-history-detail", historyPointText(point, subject.label));
+      })
+      .on("mouseleave", () => setText("subject-history-detail", historyPointText(selectedPoint, subject.label)))
+      .on("click", (event) => {
+        const point = nearestChartPoint(event, svg.node(), x, width, available);
+        selectObservation(point.index, { focusSubjectPoint: true });
+      });
+  }
 }
 
 function renderEvidenceOptions() {
@@ -620,6 +888,7 @@ function renderSelected() {
   renderPace();
   renderSubjects();
   renderEvidenceOptions();
+  renderSubjectHistory();
   renderEvidence();
   renderEvents();
 }
@@ -645,32 +914,41 @@ function chooseBenchmark(id, focus = false) {
   if (focus) $("benchmark-select").focus();
 }
 
+function showHistory(id) {
+  chooseBenchmark(id);
+  revealSection("analysis-heading");
+}
+
 function bindControls() {
   $("retry").addEventListener("click", load);
   document.querySelectorAll('a[href^="#"]').forEach((anchor) => anchor.addEventListener("click", () => {
     revealSection(anchor.hash.slice(1), false);
   }));
   window.addEventListener("hashchange", followSectionHash);
-  $("analysis-section").addEventListener("toggle", drawHistory);
   new ResizeObserver(updateExplorerPlacement).observe($("explorer"));
   $("chart-library").addEventListener("load", () => {
     state.chartsAvailable = chartLibraryAvailable();
+    drawOverviewSparklines();
     drawHistory();
+    renderSubjectHistory();
   });
   $("benchmark-select").addEventListener("change", (event) => chooseBenchmark(event.target.value));
-  for (const id of ["named", "undergraduate"]) $(`explore-${id}`).addEventListener("click", () => chooseBenchmark(id, true));
+  for (const id of ["named", "undergraduate"]) {
+    $(`explore-${id}`).addEventListener("click", () => showHistory(id));
+    $(`${id}-sparkline-action`).addEventListener("click", () => showHistory(id));
+  }
   $("observation-select").addEventListener("change", (event) => {
-    state.snapshotIndex = Number(event.target.value);
-    state.eventIndex = null;
-    state.eventLimit = PAGE_SIZE;
-    state.evidenceLimit = PAGE_SIZE;
-    renderSelected();
+    selectObservation(Number(event.target.value));
   });
-  document.querySelectorAll('input[name="window"]').forEach((input) => input.addEventListener("change", () => {
+  document.querySelectorAll('input[name="history-scale"]').forEach((input) => input.addEventListener("change", () => {
     if (!input.checked) return;
-    state.months = Number(input.value);
+    state.historyScale = input.value;
+    drawHistory();
+  }));
+  document.querySelectorAll('input[name="pace-window"]').forEach((input) => input.addEventListener("change", () => {
+    if (!input.checked) return;
+    state.paceMonths = Number(input.value);
     renderPace();
-    renderSubjects();
   }));
   $("subject-search").addEventListener("input", (event) => {
     state.subjectQuery = event.target.value;
@@ -715,7 +993,9 @@ function bindControls() {
   });
   window.addEventListener("resize", () => {
     updateExplorerPlacement();
+    drawOverviewSparklines();
     drawHistory();
+    renderSubjectHistory();
   });
 }
 
@@ -742,8 +1022,10 @@ async function load() {
       throw new Error("data.json is missing or is not valid JSON.");
     }
     state.data = validatePayload(data);
-    state.months = 6;
-    document.querySelector('input[name="window"][value="6"]').checked = true;
+    state.paceMonths = 6;
+    state.historyScale = "fit";
+    document.querySelector('input[name="pace-window"][value="6"]').checked = true;
+    document.querySelector('input[name="history-scale"][value="fit"]').checked = true;
     state.chartsAvailable = chartLibraryAvailable();
     renderOverview();
     renderMethodology();

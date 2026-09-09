@@ -14,7 +14,7 @@
     <div class="header-top">
       <div>
         <h1>Mathlib coverage</h1>
-        <p class="intro">Two benchmarks. Coverage, recording pace, and subject gaps.</p>
+        <p class="intro">Two benchmarks. Coverage history, recent change, and subject gaps.</p>
       </div>
       <div class="observation-meta" aria-label="Dataset observation and source">
         <p><span class="meta-label">Observed</span> <span id="observed-at" class="observation-date">Not loaded</span></p>
@@ -27,8 +27,8 @@
       <a href="#benchmark-methods">What counts?</a></p>
     <nav class="section-nav" aria-label="Dashboard sections">
       <a href="#overview-heading">Overview</a>
-      <a href="#subjects-heading">Subjects</a>
       <a href="#analysis-heading">History &amp; pace</a>
+      <a href="#subjects-heading">Subjects</a>
       <a href="#evidence-heading">Evidence</a>
       <a href="#methodology">Methods &amp; sources</a>
     </nav>
@@ -60,9 +60,13 @@
           <div class="headline-value"><strong id="named-percentage">—</strong><span>recorded coverage</span></div>
           <p id="named-count" class="benchmark-count"></p>
           <div class="coverage-track hero-track" aria-hidden="true"><span id="named-bar"></span></div>
+          <button id="named-sparkline-action" class="sparkline-button" type="button" aria-label="View the full coverage history for named theorems">
+            <svg id="named-sparkline" class="overview-sparkline" role="img"></svg>
+          </button>
+          <p id="named-trend-summary" class="trend-summary small"></p>
           <p id="named-pace" class="benchmark-pace"></p>
           <div class="card-bottom">
-            <button id="explore-named" class="text-button" type="button">Compare subjects <span aria-hidden="true">→</span></button>
+            <button id="explore-named" class="text-button" type="button">View history <span aria-hidden="true">→</span></button>
           </div>
         </article>
         <article class="benchmark-card secondary-benchmark" aria-labelledby="undergraduate-title">
@@ -71,9 +75,13 @@
           <div class="headline-value"><strong id="undergraduate-percentage">—</strong><span>recorded coverage</span></div>
           <p id="undergraduate-count" class="benchmark-count"></p>
           <div class="coverage-track hero-track" aria-hidden="true"><span id="undergraduate-bar"></span></div>
+          <button id="undergraduate-sparkline-action" class="sparkline-button" type="button" aria-label="View the full coverage history for the undergraduate curriculum">
+            <svg id="undergraduate-sparkline" class="overview-sparkline" role="img"></svg>
+          </button>
+          <p id="undergraduate-trend-summary" class="trend-summary small"></p>
           <p id="undergraduate-pace" class="benchmark-pace"></p>
           <div class="card-bottom">
-            <button id="explore-undergraduate" class="text-button" type="button">Compare subjects <span aria-hidden="true">→</span></button>
+            <button id="explore-undergraduate" class="text-button" type="button">View history <span aria-hidden="true">→</span></button>
           </div>
         </article>
       </div>
@@ -93,85 +101,59 @@
           <label for="observation-select">Observation</label>
           <select id="observation-select"></select>
         </div>
-        <fieldset class="window-control">
-          <legend>Change window</legend>
-          <div class="segmented-control">
-            <label><input type="radio" name="window" value="3"><span>3 months</span></label>
-            <label><input type="radio" name="window" value="6" checked><span>6 months</span></label>
-            <label><input type="radio" name="window" value="12"><span>12 months</span></label>
-          </div>
-        </fieldset>
       </div>
       <div class="selection-strip">
         <span id="selection-badge" class="badge"></span>
         <p id="selection-detail" class="small"></p>
       </div>
       <p id="historical-notice" class="historical-notice" hidden><strong>Historical view.</strong>
-        Everything below follows this observation. Overview cards remain latest.</p>
+        Detail values below follow this observation. Overview cards and the full history line remain current.</p>
     </section>
 
-    <section id="subjects-section" class="panel subjects-panel" aria-labelledby="subjects-heading">
-      <div class="section-heading">
-        <h2 id="subjects-heading" tabindex="-1">Compare subjects</h2>
-        <p id="subjects-period" class="small muted"></p>
+    <section id="analysis-section" class="panel history-workspace" aria-labelledby="analysis-heading">
+      <div class="section-heading history-heading">
+        <div>
+          <p class="eyebrow">Trend</p>
+          <h2 id="analysis-heading" tabindex="-1">Coverage history</h2>
+        </div>
+        <p class="small muted">Select any observation to inspect the dashboard at that point in time.</p>
       </div>
-      <div class="filter-grid subject-filters">
-        <div class="field"><label for="subject-search">Find a subject</label><input id="subject-search" type="search" placeholder="Name or MSC code" autocomplete="off"></div>
-        <div class="field"><label for="subject-sort">Order by</label><select id="subject-sort">
-          <option value="gaps" selected>Largest recorded gaps</option>
-          <option value="coverage">Lowest recorded coverage</option>
-          <option value="change">Most positive comparable change</option>
-          <option value="name">Subject name, A–Z</option>
-        </select></div>
-      </div>
-      <table class="subject-table" role="table">
-        <caption id="subjects-caption" class="sr-only"></caption>
-        <thead role="rowgroup"><tr role="row">
-          <th id="subject-name-column" scope="col" role="columnheader">Subject</th>
-          <th scope="col" role="columnheader">Recorded / listed</th>
-          <th id="subject-coverage-column" scope="col" role="columnheader">Coverage</th>
-          <th id="subject-change-column" scope="col" role="columnheader"><span id="subject-change-heading">6-month change</span><span class="table-subheading">same cohort · percentage points</span></th>
-          <th id="subject-gap-column" scope="col" role="columnheader" aria-sort="descending">No repo reference</th>
-        </tr></thead>
-        <tbody id="subject-rows" role="rowgroup"></tbody>
-      </table>
-      <div class="list-footer">
-        <p id="subject-count" class="small muted" role="status"></p>
-        <button id="subjects-more" class="secondary-button" type="button" hidden>Show all subjects</button>
-      </div>
-      <details class="data-disclosure">
-        <summary>How to read this comparison</summary>
-        <p id="subject-window-explanation" class="small"></p>
-        <p class="small muted">“No repo reference” includes every listed entry without a recorded repository reference,
-          not just unlinked entries. Missing references do not establish absence from mathlib.
-          Select a subject to inspect the evidence behind its counts.</p>
-        <p class="small"><a id="selection-source">View selected catalog YAML</a></p>
-      </details>
-    </section>
-
-    <details id="analysis-section" class="panel workspace-disclosure">
-      <summary><h2 id="analysis-heading" tabindex="-1">History &amp; recording pace
-        <span class="disclosure-hint">Trends, comparisons, and catalog changes</span></h2></summary>
       <p id="analysis-context" class="small muted"></p>
       <p id="chart-warning" class="notice" role="status" hidden>The chart is currently unavailable.
         Counts, comparisons, and the history table remain available.</p>
-      <section class="detail-section history-panel" aria-labelledby="history-heading">
+      <section class="history-panel" aria-labelledby="history-heading">
         <div class="section-heading">
           <h3 id="history-heading" tabindex="-1">Recorded coverage over time</h3>
           <p id="selected-level" class="selected-level"></p>
         </div>
         <p id="history-description" class="small muted">The share of listed entries with a declaration or module reference.
-          Steps connect observations; there is no assumed zero before the catalog begins.</p>
+          The full published history remains visible when an earlier observation is selected. Observation dates are not proof dates.</p>
+        <div class="history-toolbar">
+          <fieldset class="chart-scale-control">
+            <legend>Vertical scale</legend>
+            <div class="segmented-control compact-segments">
+              <label><input type="radio" name="history-scale" value="fit" checked><span>Fit trend</span></label>
+              <label><input type="radio" name="history-scale" value="absolute"><span>0–100%</span></label>
+            </div>
+          </fieldset>
+          <p id="history-scale-note" class="small muted">Fitted to the observed range so recorded changes remain visible.</p>
+        </div>
         <figure class="history-figure">
-          <svg id="history-chart" role="img" aria-labelledby="history-chart-title history-chart-description"></svg>
+          <div class="history-chart-wrap">
+            <svg id="history-chart" role="img" aria-labelledby="history-chart-title history-chart-description"></svg>
+            <div id="history-tooltip" class="chart-tooltip" role="tooltip" hidden></div>
+          </div>
           <p id="chart-unavailable" class="empty-state" hidden>Chart unavailable. Use the equivalent history table below.</p>
           <figcaption class="chart-legend">
-            <span><span class="legend-line" aria-hidden="true"></span>Recorded coverage</span>
+            <span><span class="legend-line" aria-hidden="true"></span>Through selected observation</span>
+            <span><span class="legend-line future" aria-hidden="true"></span>Later published history</span>
             <span><span class="legend-circle" aria-hidden="true"></span>Selected observation</span>
             <span><span class="legend-square" aria-hidden="true"></span>Documentation batch</span>
             <span><span class="legend-dash" aria-hidden="true"></span>Repository boundary</span>
           </figcaption>
         </figure>
+        <p id="history-point-detail" class="history-point-detail small" role="status"></p>
+        <p id="history-selection-status" class="sr-only" aria-live="polite"></p>
         <div id="history-context" class="context-notes"></div>
         <p id="history-range" class="small muted"></p>
         <details class="data-disclosure">
@@ -188,9 +170,19 @@
         </details>
       </section>
 
-      <section class="detail-section" aria-labelledby="pace-heading">
-        <div class="section-heading">
-          <h3 id="pace-heading" tabindex="-1">Recording pace</h3>
+      <details id="pace-section" class="detail-section pace-disclosure">
+        <summary><h3 id="pace-heading" tabindex="-1">Recording pace
+          <span class="disclosure-hint">Compare recent complete periods and inspect catalog flow</span></h3></summary>
+        <div class="pace-control-row">
+          <fieldset class="pace-window-control">
+            <legend>Compare recent progress over</legend>
+            <div class="segmented-control">
+              <label><input type="radio" name="pace-window" value="3"><span>3 months</span></label>
+              <label><input type="radio" name="pace-window" value="6" checked><span>6 months</span></label>
+              <label><input type="radio" name="pace-window" value="12"><span>12 months</span></label>
+            </div>
+          </fieldset>
+          <p class="small muted">Compares the most recent complete period with the equally long period immediately before it.</p>
         </div>
         <p id="period-caption" class="period-caption"></p>
         <div class="analysis-grid">
@@ -220,13 +212,65 @@
           <summary id="partial-title">Latest-only changes since the last monthly cutoff</summary>
           <p id="partial-description" class="small"></p>
         </details>
-      </section>
-    </details>
+      </details>
+    </section>
+
+    <section id="subjects-section" class="panel subjects-panel" aria-labelledby="subjects-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Gaps</p>
+          <h2 id="subjects-heading" tabindex="-1">Compare subjects</h2>
+        </div>
+        <p id="subjects-period" class="small muted"></p>
+      </div>
+      <div class="filter-grid subject-filters">
+        <div class="field"><label for="subject-search">Find a subject</label><input id="subject-search" type="search" placeholder="Name or MSC code" autocomplete="off"></div>
+        <div class="field"><label for="subject-sort">Order by</label><select id="subject-sort">
+          <option value="gaps" selected>Largest recorded gaps</option>
+          <option value="coverage">Lowest coverage</option>
+          <option value="change">Largest 6-month gain</option>
+          <option value="name">Subject name, A–Z</option>
+        </select></div>
+      </div>
+      <table class="subject-table" role="table">
+        <caption id="subjects-caption" class="sr-only"></caption>
+        <thead role="rowgroup"><tr role="row">
+          <th id="subject-name-column" scope="col" role="columnheader">Subject</th>
+          <th id="subject-coverage-column" scope="col" role="columnheader">Coverage<span class="table-subheading">recorded / listed · percentage</span></th>
+          <th id="subject-change-column" scope="col" role="columnheader">6-month change<span class="table-subheading">same cohort · percentage points</span></th>
+          <th id="subject-gap-column" scope="col" role="columnheader" aria-sort="descending">No recorded repo reference</th>
+        </tr></thead>
+        <tbody id="subject-rows" role="rowgroup"></tbody>
+      </table>
+      <div class="list-footer">
+        <p id="subject-count" class="small muted" role="status"></p>
+        <button id="subjects-more" class="secondary-button" type="button" hidden>Show all subjects</button>
+      </div>
+      <details class="data-disclosure">
+        <summary>How to read this comparison</summary>
+        <p id="subject-window-explanation" class="small"></p>
+        <p class="small muted">“No recorded repo reference” includes every listed entry without a recorded repository reference,
+          not just unlinked entries. Missing references do not establish absence from mathlib.
+          Select a subject to inspect its trend and evidence.</p>
+        <p class="small"><a id="selection-source">View selected catalog YAML</a></p>
+      </details>
+    </section>
 
     <details id="evidence-section" class="panel workspace-disclosure">
-      <summary><h2 id="evidence-heading" tabindex="-1">Look behind the numbers
-        <span class="disclosure-hint">Entries, references, and source commits</span></h2></summary>
+      <summary><h2 id="evidence-heading" tabindex="-1">Subject details &amp; evidence
+        <span class="disclosure-hint">Subject trend, entries, references, and source commits</span></h2></summary>
       <p id="evidence-context" class="small muted"></p>
+      <section id="subject-history-section" class="subject-history-section" aria-labelledby="subject-history-heading" hidden>
+        <div class="section-heading">
+          <h3 id="subject-history-heading">Subject coverage over time</h3>
+          <p id="subject-history-level" class="selected-level"></p>
+        </div>
+        <div class="subject-history-chart-wrap">
+          <svg id="subject-history-chart" role="img" aria-labelledby="subject-history-chart-title subject-history-chart-description"></svg>
+        </div>
+        <p id="subject-history-detail" class="history-point-detail small" role="status"></p>
+        <p id="subject-chart-unavailable" class="empty-state" hidden>Subject chart unavailable. Evidence remains available below.</p>
+      </section>
       <div class="filter-grid evidence-filters">
         <div class="field"><label for="evidence-subject">Subject evidence</label><select id="evidence-subject"></select></div>
         <div class="field"><label for="evidence-status">Recorded evidence class</label><select id="evidence-status">
@@ -270,8 +314,8 @@
             <p id="event-change-count" class="small muted" role="status"></p>
             <button id="event-more" class="secondary-button" type="button" hidden>Show more changes</button>
           </div>
+        </div>
       </details>
-      </div>
     </details>
 
     <section id="methodology" class="methodology" aria-labelledby="methodology-heading">

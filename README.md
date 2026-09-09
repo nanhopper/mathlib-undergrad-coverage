@@ -11,11 +11,21 @@ It uses two independent benchmarks, not one "percentage of all mathematics":
 | [French undergraduate curriculum][undergrad] | Syllabus topics with declaration or internal mathlib module references | Unequal topic granularity, overlap, incomplete recording, and a limited curriculum |
 
 The dashboard opens on the latest observation and does not autoplay or animate
-its counters. Both overview cards show coverage and the latest complete
-six-month recording pace, followed directly by subject comparisons. The shared
-controls support other observations and windows, staying visible on larger
-screens when they fit comfortably. History, detailed pace comparisons, and
-evidence start collapsed; selecting a subject opens its evidence. Definitions,
+its counters. Both overview cards show coverage, a full-history sparkline, and
+the latest complete six-month recording pace. The main history chart follows
+the benchmark and observation controls, before the subject comparison.
+
+The history chart defaults to a visibly labelled fitted scale so changes are
+legible; a 0–100% option restores absolute catalog context. Hovering or focusing
+a point shows its date, coverage, count, source, and change from the previous
+observation. Activating a point selects that historical observation across the
+dashboard while leaving the complete published line visible. Later observations
+are muted rather than removed.
+
+Headline and subject changes always use six complete months. The 3-, 6-, and
+12-month choice appears only inside the detailed recording-pace disclosure,
+where it compares the most recent complete period with the equally long period
+immediately before it. Subject details, evidence, catalog commits, definitions,
 reference breakdowns, and provenance remain available on demand. Library
 activity is not substituted for mathematical coverage.
 
